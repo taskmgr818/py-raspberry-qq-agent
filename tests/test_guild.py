@@ -1,13 +1,59 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, Mock
 
 import httpx
 import pytest
 
+from py_raspberry_qq_agent.allowlist import ChatAllowlist
+from py_raspberry_qq_agent.assignments import AssignmentNotifications
+from py_raspberry_qq_agent.config import AppConfig
 from py_raspberry_qq_agent.guild import DueReminders, GuildConfig, WindowPoller
 from py_raspberry_qq_agent.keycloak import KeycloakConfig, KeycloakDirectory, User
+from py_raspberry_qq_agent.napcat import OutboundQueue
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["assignment", "due"])
+async def test_business_notifications_deliver_outside_model_allowlist(
+    config: AppConfig, kind: str
+) -> None:
+    start = datetime(2026, 10, 25, tzinfo=UTC)
+    row = {
+        "id": 1,
+        "title": "Task",
+        "subject": "alice",
+        "role": "leader",
+        "due_at": start + timedelta(days=1),
+    }
+    repository = AsyncMock()
+    repository.query.return_value = [row]
+    repository.due.return_value = [row]
+    directory = AsyncMock()
+    directory.user.return_value = User("alice", "Alice", "54321")
+    napcat = AsyncMock()
+    outbound = OutboundQueue(
+        config,
+        napcat,
+        ChatAllowlist(enabled=True, private_qq_ids=[], group_ids=[]),
+    )
+    service = (
+        AssignmentNotifications(GuildConfig(), repository, directory, outbound)
+        if kind == "assignment"
+        else DueReminders(GuildConfig(), repository, directory, outbound, UTC)
+    )
+    outbound.start()
+    try:
+        await service.check(start, start + timedelta(minutes=1))
+        await asyncio.wait_for(outbound._queue.join(), timeout=1)
+        napcat.send_private.assert_awaited_once()
+        assert napcat.send_private.call_args.args[0] == "54321"
+        with pytest.raises(PermissionError):
+            outbound.enqueue("private", "54321", "model message")
+    finally:
+        await outbound.stop()
 
 
 @pytest.mark.asyncio
@@ -52,7 +98,7 @@ async def test_due_uses_one_day_trigger_and_continues_past_unbound_or_failed_sen
         User("2", "Works", "54321"),
     ]
     outbound = Mock()
-    outbound.enqueue.side_effect = [RuntimeError("full"), None]
+    outbound.enqueue_notification.side_effect = [RuntimeError("full"), None]
     service = DueReminders(
         GuildConfig(public_url="https://guild.example.com"),
         repository,
@@ -63,9 +109,12 @@ async def test_due_uses_one_day_trigger_and_continues_past_unbound_or_failed_sen
     end = start + timedelta(minutes=1)
     await service.check(start, end)
     repository.due.assert_awaited_once_with(start, end, timedelta(days=1))
-    assert outbound.enqueue.call_count == 2
-    assert outbound.enqueue.call_args.args[1] == "54321"
-    assert "https://guild.example.com/nodes/2" in outbound.enqueue.call_args.args[2]
+    assert outbound.enqueue_notification.call_count == 2
+    assert outbound.enqueue_notification.call_args.args[1] == "54321"
+    assert (
+        "https://guild.example.com/nodes/2"
+        in outbound.enqueue_notification.call_args.args[2]
+    )
 
 
 @pytest.mark.asyncio

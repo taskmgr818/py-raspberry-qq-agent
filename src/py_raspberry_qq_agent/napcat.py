@@ -454,7 +454,7 @@ class OutboundQueue:
         self._napcat = napcat
         self._allowlist = allowlist
         self._messages = messages
-        self._queue: asyncio.Queue[tuple[str, str, str]] = asyncio.Queue(
+        self._queue: asyncio.Queue[tuple[str, str, str, bool]] = asyncio.Queue(
             maxsize=config.outbound_queue_size
         )
         self._worker: asyncio.Task[None] | None = None
@@ -474,22 +474,36 @@ class OutboundQueue:
             self._worker = None
 
     def enqueue(self, chat_type: str, target_id: str, content: str) -> None:
+        self._enqueue(chat_type, target_id, content, enforce_allowlist=True)
+
+    def enqueue_notification(self, chat_type: str, target_id: str, content: str) -> None:
+        """Queue a program-selected business notification, never a model action."""
+        self._enqueue(chat_type, target_id, content, enforce_allowlist=False)
+
+    def _enqueue(
+        self,
+        chat_type: str,
+        target_id: str,
+        content: str,
+        *,
+        enforce_allowlist: bool,
+    ) -> None:
         if chat_type not in {"private", "group"}:
             raise ValueError("chat_type must be private or group")
         if not target_id.isdecimal():
             raise ValueError("target_id must be a QQ number")
-        if not self._allowlist.allows(chat_type, target_id):
+        if enforce_allowlist and not self._allowlist.allows(chat_type, target_id):
             raise PermissionError("chat is not in the enabled allowlist")
         if not content.strip():
             raise ValueError("message content cannot be empty")
         if self._queue.full():
             raise RuntimeError("outbound message queue is full")
-        self._queue.put_nowait((chat_type, target_id, content))
+        self._queue.put_nowait((chat_type, target_id, content, enforce_allowlist))
 
     async def _run(self) -> None:
         loop = asyncio.get_running_loop()
         while True:
-            chat_type, target_id, content = await self._queue.get()
+            chat_type, target_id, content, enforce_allowlist = await self._queue.get()
             try:
                 if self._last_sent_at is not None:
                     interval = random.uniform(
@@ -499,7 +513,7 @@ class OutboundQueue:
                     wait_for = self._last_sent_at + interval - loop.time()
                     if wait_for > 0:
                         await asyncio.sleep(wait_for)
-                if not self._allowlist.allows(chat_type, target_id):
+                if enforce_allowlist and not self._allowlist.allows(chat_type, target_id):
                     raise PermissionError("chat is not in the enabled allowlist")
                 if chat_type == "group":
                     response = await self._napcat.send_group(target_id, content)

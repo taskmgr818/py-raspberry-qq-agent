@@ -74,6 +74,28 @@ def test_outbound_queue_rejects_unlisted_target(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_delivery_rechecks_allowlist_only_for_model_messages(
+    config: AppConfig,
+) -> None:
+    napcat = RecordingNapCat()
+    queue = OutboundQueue(
+        config,
+        napcat,
+        ChatAllowlist(enabled=True, private_qq_ids=["12345"], group_ids=[]),
+    )
+    queue.enqueue("private", "12345", "model message")
+    queue.enqueue_notification("private", "12345", "business notification")
+    # Revoke permission after enqueueing, before the worker attempts delivery.
+    queue._allowlist = ChatAllowlist(enabled=True, private_qq_ids=[], group_ids=[])
+    queue.start()
+    try:
+        await asyncio.wait_for(queue._queue.join(), timeout=1)
+    finally:
+        await queue.stop()
+    assert napcat.messages == [("12345", "business notification")]
+
+
+@pytest.mark.asyncio
 async def test_outbound_queue_logs_napcat_error_details_and_continues(
     config: AppConfig, caplog: pytest.LogCaptureFixture
 ) -> None:

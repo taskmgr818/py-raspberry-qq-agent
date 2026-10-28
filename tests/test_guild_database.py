@@ -90,10 +90,10 @@ async def test_assignment_windows_include_only_current_role_changes(database) ->
     outbound = Mock()
     service = AssignmentNotifications(GuildConfig(), repository, directory, outbound)
     await service.check(start, end)
-    outbound.enqueue.assert_not_called()
+    outbound.enqueue_notification.assert_not_called()
     await service.check(end, end + timedelta(minutes=1))
-    outbound.enqueue.assert_called_once()
-    assert "成员" in outbound.enqueue.call_args.args[2]
+    outbound.enqueue_notification.assert_called_once()
+    assert "成员" in outbound.enqueue_notification.call_args.args[2]
     outbound.reset_mock()
     # A role promotion moves the assignment to the next window; unchanged saves do not.
     await conn.execute("DELETE FROM node_members WHERE node_id=%s", (node_id,))
@@ -102,5 +102,5 @@ async def test_assignment_windows_include_only_current_role_changes(database) ->
         (node_id, subject, end + timedelta(minutes=1)),
     )
     await service.check(end + timedelta(minutes=1), end + timedelta(minutes=2))
-    outbound.enqueue.assert_called_once()
-    assert "负责人" in outbound.enqueue.call_args.args[2]
+    outbound.enqueue_notification.assert_called_once()
+    assert "负责人" in outbound.enqueue_notification.call_args.args[2]

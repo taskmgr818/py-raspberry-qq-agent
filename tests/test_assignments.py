@@ -28,8 +28,8 @@ async def test_assignment_notifications_are_independent_of_due_reminders() -> No
     end = start + timedelta(minutes=1)
     await service.check(start, end)
     assert repository.query.call_args.args[1] == (start, end)
-    assert outbound.enqueue.call_count == 2
-    first, second = outbound.enqueue.call_args_list
+    assert outbound.enqueue_notification.call_count == 2
+    first, second = outbound.enqueue_notification.call_args_list
     assert first.args == ("private", "12345", "你已被指定为任务的负责人：First task")
     assert second.args == ("private", "54321", "你已被指定为任务的成员：Second task")
     repository.due.assert_not_awaited()

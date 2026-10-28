@@ -60,7 +60,8 @@ message_gate:
   group_mention_enabled: true
   allowlist:
     # When enabled, only these private chats and groups may trigger or receive
-    # Agent messages. History reads are deliberately not restricted by this list.
+    # model-initiated messages, including scheduled Agent tasks. Program-selected
+    # assignment/due notifications and history reads are not restricted by this list.
     enabled: false
     private_qq_ids: []
     group_ids: []

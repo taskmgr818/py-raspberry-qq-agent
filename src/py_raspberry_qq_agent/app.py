@@ -97,8 +97,8 @@ class Application:
             )
             if not (config.allowlist_private_qq_ids or config.allowlist_group_ids):
                 LOGGER.warning(
-                    "chat allowlist is enabled but empty; all chat triggers and sends "
-                    "will be blocked"
+                    "chat allowlist is enabled but empty; all chat triggers and "
+                    "model-initiated sends will be blocked"
                 )
 
         incoming: IncomingService

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 
 class ChatAllowlist:
-    """Hard allowlist for chats that may trigger or receive Agent actions."""
+    """Hard allowlist for chat triggers and model-initiated QQ messages."""
 
     def __init__(
         self,

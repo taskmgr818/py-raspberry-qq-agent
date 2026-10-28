@@ -133,7 +133,7 @@ async def notify(
                 "notification skipped: no enabled QQ binding subject=%s", subject
             )
             return
-        outbound.enqueue("private", user.qq, content)
+        outbound.enqueue_notification("private", user.qq, content)
     except Exception:
         LOGGER.exception("notification failed subject=%s", subject)
 
