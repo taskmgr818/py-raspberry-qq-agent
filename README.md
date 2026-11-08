@@ -291,8 +291,9 @@ keycloak:
 
 有效领域角色通过 Keycloak `/users/{id}/role-mappings/realm/composite` 读取。
 职务使用 `bitnp-authz` Python 包的 `positions_from_roles()` 解析，与 guild 固定到同一上游提交
-`643da5d210aa`；不另行维护角色名称、部门或职务优先级规则。依赖使用固定提交的 HTTPS 归档，
-构建时需要访问 `git.bitnp.net`，无需安装 Git。
+`643da5d210aa`；不另行维护角色名称、部门或职务优先级规则。Python 包源码已放入
+`third_party/bitnp-authz`，uv 和 Docker 构建均使用本地路径，不需要访问私有仓库。
+来源和更新方式见 [third_party/README.md](third_party/README.md)。
 
 `scripts/configure_keycloak.py` 默认只预览计划。它添加管理员可维护的单值 `qq_number` 属性，
 创建或补配独立 `qq-bot` client，启用服务账号并授予用户只读角色及相应 client scope。

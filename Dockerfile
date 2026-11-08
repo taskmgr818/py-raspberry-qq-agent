@@ -11,6 +11,7 @@ ENV PYTHONUNBUFFERED=1 \
 
 COPY pyproject.toml uv.lock README.md ./
 COPY src/ ./src/
+COPY third_party/ ./third_party/
 RUN uv sync --frozen --no-dev --no-editable
 
 ENTRYPOINT ["py-raspberry-qq-agent", "--config", "/app/config.yaml"]

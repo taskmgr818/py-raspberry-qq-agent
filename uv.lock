@@ -41,9 +41,7 @@ wheels = [
 
 [[package]]
 name = "bitnp-authz"
-version = "1.0.0"
-source = { url = "https://git.bitnp.net/BITNP/bitnp-authz/archive/643da5d210aacfd18643862ffdc3e5ef442b63f7.tar.gz", subdirectory = "python" }
-sdist = { hash = "sha256:394ba93b9b2a5ff926350cf5eb3ffd371417488356fe949534ed5d687bae7518" }
+source = { directory = "third_party/bitnp-authz" }
 
 [[package]]
 name = "certifi"
@@ -435,7 +433,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "bitnp-authz", url = "https://git.bitnp.net/BITNP/bitnp-authz/archive/643da5d210aacfd18643862ffdc3e5ef442b63f7.tar.gz", subdirectory = "python" },
+    { name = "bitnp-authz", directory = "third_party/bitnp-authz" },
     { name = "httpx", specifier = ">=0.27,<1" },
     { name = "mcp", specifier = ">=1.9,<2" },
     { name = "psycopg", extras = ["binary"], specifier = ">=3.2,<4" },

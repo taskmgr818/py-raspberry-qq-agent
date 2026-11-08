@@ -8,7 +8,7 @@ authors = [
 ]
 requires-python = ">=3.12"
 dependencies = [
-    "bitnp-authz @ https://git.bitnp.net/BITNP/bitnp-authz/archive/643da5d210aacfd18643862ffdc3e5ef442b63f7.tar.gz#subdirectory=python",
+    "bitnp-authz==1.0.0",
     "httpx>=0.27,<1",
     "mcp>=1.9,<2",
     "psycopg[binary]>=3.2,<4",
@@ -30,3 +30,10 @@ dev = [
 [build-system]
 requires = ["uv_build>=0.13.4,<0.14.0"]
 build-backend = "uv_build"
+
+[tool.uv.sources]
+bitnp-authz = { path = "third_party/bitnp-authz" }
+
+[tool.uv.build-backend]
+source-include = ["third_party/**"]
+source-exclude = ["**/__pycache__/**", "**/*.egg-info/**", "**/build/**"]

@@ -1,6 +1,9 @@
 .git
 .venv
 __pycache__
+**/__pycache__
+**/build
+**/*.egg-info
 *.py[cod]
 .pytest_cache
 .ruff_cache
