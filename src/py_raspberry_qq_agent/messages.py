@@ -31,6 +31,7 @@ class MessageStore:
         timestamp: float,
         message_id: str = "",
         mentioned_bot: bool = False,
+        mentions: list[dict[str, str]] | None = None,
     ) -> None:
         record = {
             "chat_type": chat_type,
@@ -41,6 +42,7 @@ class MessageStore:
             "timestamp": timestamp,
             "message_id": message_id,
             "mentioned_bot": mentioned_bot,
+            "mentions": mentions or [],
         }
         async with self._lock:
             await asyncio.to_thread(append_jsonl, self._path, record)

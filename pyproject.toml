@@ -8,6 +8,7 @@ authors = [
 ]
 requires-python = ">=3.12"
 dependencies = [
+    "bitnp-authz @ https://git.bitnp.net/BITNP/bitnp-authz/archive/643da5d210aacfd18643862ffdc3e5ef442b63f7.tar.gz#subdirectory=python",
     "httpx>=0.27,<1",
     "mcp>=1.9,<2",
     "psycopg[binary]>=3.2,<4",

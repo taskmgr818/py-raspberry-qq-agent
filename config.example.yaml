@@ -138,6 +138,8 @@ mcp:
           - upload_markdown
 
 keycloak:
+  # Member identity lookup can run without enabling guild. Guild also enables it.
+  enabled: ${KEYCLOAK_ENABLED:-false}
   issuer: ${OIDC_ISSUER:-}
   admin_url: ${KEYCLOAK_ADMIN_URL:-}
   client_id: ${BOT_KEYCLOAK_CLIENT_ID:-}
