@@ -9,7 +9,7 @@ import time
 import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Protocol
 
 from websockets.asyncio.client import ClientConnection, connect
 
@@ -184,9 +184,7 @@ class NapCatClient:
         mentioned = False
         message = payload.get("message")
         if isinstance(message, str):
-            if self_id and re.search(
-                rf"\[CQ:at,qq={re.escape(self_id)}\]", message
-            ):
+            if self_id and re.search(rf"\[CQ:at,qq={re.escape(self_id)}\]", message):
                 mentioned = True
             text_parts.append(_strip_cq_codes(message))
         elif isinstance(message, list):
@@ -210,9 +208,7 @@ class NapCatClient:
             return None
 
         raw_chat = (
-            str(payload.get("group_id", ""))
-            if message_type == "group"
-            else raw_sender
+            str(payload.get("group_id", "")) if message_type == "group" else raw_sender
         )
         if not raw_chat:
             return None
@@ -236,6 +232,8 @@ class NapCatClient:
         *,
         timeout: float | None = None,
     ) -> dict[str, Any]:
+        if self._config.message_gateway.enabled and action.startswith("send_"):
+            raise NapCatError("outbound messages must use message-gateway")
         try:
             await asyncio.wait_for(
                 self._connected.wait(),
@@ -292,9 +290,8 @@ class NapCatClient:
                         user = await self.call_action(
                             "get_stranger_info", {"user_id": int(raw_user_id)}
                         )
-                        if (
-                            str(user.get("user_id", "")) != raw_user_id
-                            or not user.get("uid")
+                        if str(user.get("user_id", "")) != raw_user_id or not user.get(
+                            "uid"
                         ):
                             raise NapCatError(
                                 f"Cannot resolve user for temporary session target={raw_user_id}"
@@ -442,16 +439,22 @@ class NapCatClient:
         return f"contact-{digest}"
 
 
+class OutboundSender(Protocol):
+    async def send_private(self, raw_user_id: str, content: str) -> dict[str, Any]: ...
+
+    async def send_group(self, raw_group_id: str, content: str) -> dict[str, Any]: ...
+
+
 class OutboundQueue:
     def __init__(
         self,
         config: AppConfig,
-        napcat: NapCatClient,
+        sender: OutboundSender,
         allowlist: ChatAllowlist,
         messages: MessageStore | None = None,
     ) -> None:
         self._config = config
-        self._napcat = napcat
+        self._sender = sender
         self._allowlist = allowlist
         self._messages = messages
         self._queue: asyncio.Queue[tuple[str, str, str, bool]] = asyncio.Queue(
@@ -476,7 +479,9 @@ class OutboundQueue:
     def enqueue(self, chat_type: str, target_id: str, content: str) -> None:
         self._enqueue(chat_type, target_id, content, enforce_allowlist=True)
 
-    def enqueue_notification(self, chat_type: str, target_id: str, content: str) -> None:
+    def enqueue_notification(
+        self, chat_type: str, target_id: str, content: str
+    ) -> None:
         """Queue a program-selected business notification, never a model action."""
         self._enqueue(chat_type, target_id, content, enforce_allowlist=False)
 
@@ -505,7 +510,9 @@ class OutboundQueue:
         while True:
             chat_type, target_id, content, enforce_allowlist = await self._queue.get()
             try:
-                if self._last_sent_at is not None:
+                if self._last_sent_at is not None and not getattr(
+                    self._sender, "manages_pacing", False
+                ):
                     interval = random.uniform(
                         self._config.outbound_min_interval_seconds,
                         self._config.outbound_max_interval_seconds,
@@ -513,12 +520,14 @@ class OutboundQueue:
                     wait_for = self._last_sent_at + interval - loop.time()
                     if wait_for > 0:
                         await asyncio.sleep(wait_for)
-                if enforce_allowlist and not self._allowlist.allows(chat_type, target_id):
+                if enforce_allowlist and not self._allowlist.allows(
+                    chat_type, target_id
+                ):
                     raise PermissionError("chat is not in the enabled allowlist")
                 if chat_type == "group":
-                    response = await self._napcat.send_group(target_id, content)
+                    response = await self._sender.send_group(target_id, content)
                 else:
-                    response = await self._napcat.send_private(target_id, content)
+                    response = await self._sender.send_private(target_id, content)
                 self._last_sent_at = loop.time()
                 if self._messages is not None:
                     await self._messages.append(

@@ -1,0 +1,23 @@
+[Unit]
+Description=Miss Raspberry Agent (Python)
+Requires=napcat.service message-gateway.service
+After=napcat.service message-gateway.service
+
+[Container]
+Image=ghcr.io/taskmgr818/py-raspberry-qq-agent:latest
+Network=message-gateway.network
+EnvironmentFile=%h/miss-raspberry-agent/.env
+EnvironmentFile=%h/miss-raspberry-agent/.env.guild
+EnvironmentFile=%h/miss-raspberry-agent/.env.gateway
+Environment=NAPCAT_WS_URL=ws://napcat:3001
+Volume=%h/miss-raspberry-agent/config.yaml:/app/config.yaml:ro,Z
+Volume=%h/miss-raspberry-agent/data:/app/data:Z
+Volume=%h/miss-raspberry-agent/logs:/app/logs:Z
+Volume=%h/miss-raspberry-agent/knowledge:/app/knowledge:ro,Z
+Volume=%h/miss-raspberry-agent/notebooks:/app/notebooks:Z
+
+[Service]
+Restart=always
+
+[Install]
+WantedBy=default.target

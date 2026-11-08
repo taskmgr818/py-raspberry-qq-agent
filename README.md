@@ -54,6 +54,37 @@ docker run -d --name qq-agent --restart unless-stopped \
 
 这是一套尽力而为的自动化，不维护持久化工作队列、投递记录或补偿流程。
 
+## 通过 message-gateway 发信
+
+多个服务共享同一个 QQ 账号时，启用 [message-gateway](https://github.com/BITNP/message-gateway)
+统一排队和限流：
+
+```yaml
+message_gateway:
+  enabled: true
+  url: ${MESSAGE_GATEWAY_URL:-http://message-gateway:8081}
+  api_key: ${MESSAGE_GATEWAY_API_KEY}
+  account: qq
+  request_timeout_seconds: 10
+  delivery_timeout_seconds: 600
+  poll_interval_seconds: 0.5
+```
+
+`account` 对应网关 `accounts.json` 中的 `name`，API key 与网关一致。
+所有聊天回复、定时发送和业务通知均走该账号的共享队列；允许列表规则保持不变。
+启用后 Agent 不再额外随机等待，临时会话发现、发送重试和限流由网关负责。
+Agent 只提交一次 `POST /api/v1/messages`，再查询投递状态，收到 `sent` 后才记录已发送及 QQ
+消息 ID。网关失败或超时不会直连 NapCat 补发；超时意味着结果未知，避免重复提交。
+`delivery_timeout_seconds` 包含排队时间，应覆盖其他服务的积压和网关的重试时间。
+
+网关只处理出站。`napcat.ws_url` 仍用于入站事件、历史和联系人查询；启用网关后此连接禁止
+执行 `send_*` 动作。未启用网关时，保留原来的直连发送及本地随机间隔。
+
+Podman 部署示例见 [deploy/quadlet](deploy/quadlet/README.md)。三个容器共享
+`message-gateway` 网络：Agent 收信访问 `ws://napcat:3001`，发信访问
+`http://message-gateway:8081`。只向宿主机回环地址发布网关 `8081` 和 NapCat WebUI `6099`，
+NapCat 的 OneBot HTTP/WebSocket 端口不发布。Agent 无需发布端口或注册 Traefik 路由。
+
 ## 身份与模型边界
 
 业务代码、配置和本地数据直接使用 QQ 号和群号。不再使用联系人加密、加密密钥或密文映射。

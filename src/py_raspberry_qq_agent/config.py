@@ -6,6 +6,7 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 import yaml
 
@@ -81,6 +82,42 @@ class LlmConfig:
     timeout_seconds: float = 120.0
     retry_count: int = 2
     extra_body: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
+class MessageGatewayConfig:
+    enabled: bool = False
+    url: str = ""
+    api_key: str = ""
+    account: str = "qq"
+    request_timeout_seconds: float = 10
+    delivery_timeout_seconds: float = 600
+    poll_interval_seconds: float = 0.5
+
+    def validate(self) -> None:
+        if not self.enabled:
+            return
+        address = urlsplit(self.url)
+        if address.scheme not in {"http", "https"} or not address.hostname:
+            raise ConfigError("message_gateway.url must be an HTTP(S) URL")
+        if address.query or address.fragment or address.username or address.password:
+            raise ConfigError(
+                "message_gateway.url cannot contain credentials, query or fragment"
+            )
+        if not self.api_key.strip():
+            raise ConfigError("message_gateway.api_key is required")
+        if not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,31}", self.account):
+            raise ConfigError(
+                "message_gateway.account must be a valid gateway account name"
+            )
+        for name in (
+            "request_timeout_seconds",
+            "delivery_timeout_seconds",
+            "poll_interval_seconds",
+        ):
+            value = getattr(self, name)
+            if not math.isfinite(value) or value <= 0:
+                raise ConfigError(f"message_gateway.{name} must be positive and finite")
 
 
 @dataclass(slots=True)
@@ -160,6 +197,7 @@ class AppConfig:
     mcp_upload_api_token: str
     mcp_upload_headers: dict[str, str]
     mcp_upload_timeout_seconds: float
+    message_gateway: MessageGatewayConfig = field(default_factory=MessageGatewayConfig)
 
     @classmethod
     def load(cls, path: str | Path) -> AppConfig:
@@ -181,6 +219,7 @@ class AppConfig:
         logging_cfg = _section(raw, "logging")
         llm = _section(raw, "llm")
         napcat = _section(raw, "napcat")
+        message_gateway = _section(raw, "message_gateway")
         security = _section(raw, "security")
         keycloak = _section(raw, "keycloak")
         guild = _section(raw, "guild")
@@ -367,11 +406,27 @@ class AppConfig:
                 for key, value in (mcp_upload.get("headers") or {}).items()
             },
             mcp_upload_timeout_seconds=float(mcp_upload.get("timeout_seconds", 60)),
+            message_gateway=MessageGatewayConfig(
+                enabled=_as_bool(message_gateway.get("enabled", False)),
+                url=str(message_gateway.get("url", "")).rstrip("/"),
+                api_key=str(message_gateway.get("api_key", "")),
+                account=str(message_gateway.get("account", "qq")),
+                request_timeout_seconds=float(
+                    message_gateway.get("request_timeout_seconds", 10)
+                ),
+                delivery_timeout_seconds=float(
+                    message_gateway.get("delivery_timeout_seconds", 600)
+                ),
+                poll_interval_seconds=float(
+                    message_gateway.get("poll_interval_seconds", 0.5)
+                ),
+            ),
         )
         config.validate()
         return config
 
     def validate(self) -> None:
+        self.message_gateway.validate()
         if (
             not math.isfinite(self.napcat_cache_ttl_seconds)
             or self.napcat_cache_ttl_seconds <= 0

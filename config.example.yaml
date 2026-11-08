@@ -40,7 +40,19 @@ llm:
     system: ""
     time_tool: true
 
+message_gateway:
+  enabled: ${MESSAGE_GATEWAY_ENABLED:-false}
+  url: ${MESSAGE_GATEWAY_URL:-http://127.0.0.1:8081}
+  api_key: ${MESSAGE_GATEWAY_API_KEY:-}
+  account: ${MESSAGE_GATEWAY_ACCOUNT:-qq}
+  request_timeout_seconds: 10
+  # Includes waiting behind other services in the shared account queue.
+  delivery_timeout_seconds: 600
+  poll_interval_seconds: 0.5
+
 napcat:
+  # Still used for inbound messages, history and directory queries when the
+  # gateway is enabled. Outbound messages never fall back to this connection.
   ws_url: ${NAPCAT_WS_URL:-ws://127.0.0.1:3001}
   access_token: ${NAPCAT_ACCESS_TOKEN:-}
   # Enable private messages to non-friends through a verified common group.

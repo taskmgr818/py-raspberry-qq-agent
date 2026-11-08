@@ -1,0 +1,22 @@
+[Unit]
+Description=Global message gateway
+Requires=napcat.service
+After=napcat.service
+
+[Container]
+Image=ghcr.io/bitnp/message-gateway:latest
+Network=message-gateway.network
+NetworkAlias=message-gateway
+EnvironmentFile=%h/message-gateway/.env
+Volume=%h/message-gateway/accounts.json:/etc/message-gateway/accounts.json:ro
+PublishPort=127.0.0.1:8081:8081
+HealthCmd=wget -qO- http://127.0.0.1:8081/healthz
+HealthInterval=10s
+HealthTimeout=5s
+HealthRetries=5
+
+[Service]
+Restart=always
+
+[Install]
+WantedBy=default.target

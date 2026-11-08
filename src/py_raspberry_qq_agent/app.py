@@ -18,6 +18,7 @@ from .knowledge import KnowledgeBase
 from .llm import OpenAICompatibleClient
 from .logging_setup import configure_logging
 from .mcp_runtime import McpManager
+from .message_gateway import MessageGatewayClient
 from .messages import MessageStore
 from .napcat import IncomingMessage, NapCatClient, OutboundQueue
 from .priority import ImportanceGate
@@ -47,6 +48,7 @@ class Application:
     chat_directory: ChatDirectoryService
     incoming: IncomingService
     digest: GroupDigestService
+    message_gateway: MessageGatewayClient | None = None
     worker: AgentWorker | None = None
     scheduler: Scheduler | None = None
     identities: KeycloakDirectory | None = None
@@ -107,7 +109,18 @@ class Application:
             await incoming.handle(message)
 
         napcat = NapCatClient(config, on_napcat_message)
-        outbound = OutboundQueue(config, napcat, allowlist, messages)
+        message_gateway = (
+            MessageGatewayClient(config.message_gateway)
+            if config.message_gateway.enabled
+            else None
+        )
+        outbound = OutboundQueue(config, message_gateway or napcat, allowlist, messages)
+        if message_gateway:
+            LOGGER.info(
+                "outbound messages use gateway url=%s account=%s",
+                config.message_gateway.url,
+                config.message_gateway.account,
+            )
         gate = ImportanceGate(
             config, classifier_llm, allowlist, roles, contacts, messages
         )
@@ -145,6 +158,7 @@ class Application:
             chat_directory=chat_directory,
             incoming=incoming,
             digest=digest,
+            message_gateway=message_gateway,
         )
         return application
 
@@ -247,6 +261,8 @@ class Application:
         if self.scheduler is not None and self.config.scheduler_enabled:
             await self.scheduler.stop()
         await self.outbound.stop()
+        if self.message_gateway:
+            await self.message_gateway.close()
         if self.worker is not None:
             await self.worker.stop()
         await self.mcp.stop()
