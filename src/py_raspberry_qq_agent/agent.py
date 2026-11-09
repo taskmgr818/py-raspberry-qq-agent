@@ -50,7 +50,7 @@ class AgentRunner:
             ]
             messages.append(_assistant_message(reply, normalized_calls))
             for call in normalized_calls:
-                await self._execute_call(call, messages)
+                await self._execute_call(call, messages, task)
             LOGGER.info(
                 "agent tool round=%d calls=%d",
                 round_number + 1,
@@ -63,6 +63,7 @@ class AgentRunner:
         self,
         call: dict[str, Any],
         messages: list[dict[str, Any]],
+        task: AgentTask,
     ) -> None:
         function = call.get("function") or {}
         tool_name = str(function.get("name", ""))
@@ -78,7 +79,7 @@ class AgentRunner:
             if not isinstance(arguments, dict):
                 raise TypeError("tool arguments must be a JSON object")
             result = await asyncio.wait_for(
-                self._tools.execute(tool_name, arguments),
+                self._tools.execute(tool_name, arguments, task=task),
                 timeout=self._config.tool_timeout_seconds,
             )
             payload = {"ok": True, "result": result}

@@ -163,7 +163,9 @@ async def test_directory_rejects_invalid_lookup_before_http_request(args):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("disabled", [False, True])
-async def test_subject_missing_or_disabled_is_cached_but_server_failure_is_not(disabled):
+async def test_subject_missing_or_disabled_is_cached_but_server_failure_is_not(
+    disabled,
+):
     calls = []
 
     def handler(request):
@@ -237,6 +239,29 @@ async def test_effective_roles_refresh_token_and_cache_without_exposing_mutation
 
 
 @pytest.mark.asyncio
+async def test_authorization_refresh_bypasses_cached_identity_and_roles():
+    enabled = True
+    roles = [{"name": "permission-system-admin"}]
+
+    def handler(request):
+        if request.url.path.endswith("/role-mappings/realm/composite"):
+            return httpx.Response(200, json=roles)
+        return httpx.Response(200, json=[member(enabled=enabled)])
+
+    directory = await mock_directory(handler)
+    try:
+        assert (await directory.lookup_user(qq="12345")).subject == "alice"
+        assert await directory.realm_roles("alice") == ["permission-system-admin"]
+        enabled, roles = False, []
+        assert await directory.lookup_user(qq="12345") is not None
+        assert await directory.realm_roles("alice") == ["permission-system-admin"]
+        assert await directory.lookup_user(qq="12345", refresh=True) is None
+        assert await directory.realm_roles("alice", refresh=True) == []
+    finally:
+        await directory.close()
+
+
+@pytest.mark.asyncio
 async def test_member_tool_keeps_local_alias_and_bot_authorization_separate(config):
     contacts = ContactDirectory(config.data_dir / "profiles.json")
     contacts.update("12345", "阿甲", "permission-system-admin is just a note")
@@ -264,9 +289,10 @@ async def test_member_tool_keeps_local_alias_and_bot_authorization_separate(conf
     ]
     assert "12345" not in json.dumps(result)
     assert await registry.execute("get_member_identity", {"qq": "12345"}) == result
-    assert await registry.execute(
-        "get_member_identity", {"subject": result["subject"]}
-    ) == result
+    assert (
+        await registry.execute("get_member_identity", {"subject": result["subject"]})
+        == result
+    )
     local = await registry.execute("get_contact_profile", {"contact_id": ref})
     assert local["display_name"] == "阿甲"
     assert "subject" not in local and "realm_roles" not in local
@@ -310,9 +336,7 @@ async def test_role_lookup_failure_does_not_claim_empty_positions(config, args):
     directory = AsyncMock()
     directory.lookup_user.return_value = User("alice", "Alice", "12345")
     directory.realm_roles.side_effect = httpx.ConnectError("offline")
-    result = await registry_for(config, directory).execute(
-        "get_member_identity", args
-    )
+    result = await registry_for(config, directory).execute("get_member_identity", args)
     assert result["status"] == "unavailable"
     assert "positions" not in result
 
@@ -344,9 +368,10 @@ async def test_member_tool_queries_subject_with_or_without_qq_binding(config, qq
             assert "67890" not in json.dumps(result)
         else:
             assert result["contact_id"] is None
-        assert await registry.execute(
-            "get_member_identity", {"subject": "12345"}
-        ) == result
+        assert (
+            await registry.execute("get_member_identity", {"subject": "12345"})
+            == result
+        )
         assert len(calls) == 2  # User and roles both reuse the directory's cache.
     finally:
         await directory.close()
@@ -420,6 +445,8 @@ async def test_application_shares_one_directory_with_tools_and_guild(
     monkeypatch.setattr(app_module, "KeycloakDirectory", factory)
     monkeypatch.setattr(app_module, "build_tool_registry", registry_builder)
     monkeypatch.setattr(app_module, "WeeklyReports", weekly_factory)
+    repository = AsyncMock()
+    monkeypatch.setattr(app_module, "GuildRepository", Mock(return_value=repository))
     weekly_factory.return_value.stop = AsyncMock()
     monkeypatch.setattr(application.napcat.__class__, "start", Mock())
     try:
@@ -428,6 +455,11 @@ async def test_application_shares_one_directory_with_tools_and_guild(
         assert registry_builder.call_args.kwargs["identities"] is directory
         if guild_enabled:
             assert weekly_factory.call_args.args[2] is directory
+            repository.initialize.assert_not_awaited()
+            assert (
+                registry_builder.call_args.kwargs["guild_service"]._repository
+                is repository
+            )
     finally:
         await application.stop()
     directory.close.assert_awaited_once()

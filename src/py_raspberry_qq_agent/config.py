@@ -548,6 +548,13 @@ def _default_system_prompt() -> str:
    保存被 @ 的用户，可将其中 contact_id 传给 get_member_identity。
    已知 Keycloak subject（OIDC sub）时，可用该工具的 subject 参数直接查成员，无需 QQ 绑定；
    contact_id、qq、subject 三选一，不得根据姓名或备注猜测 subject。
+   guild 启用时可用 list_guild_nodes 查任务与待办（默认本人、直接参与、未完成），
+   get_guild_node 查详情，list_guild_activity 查最近动态。查别人的任务先解析 subject；
+   查全站待办用 scope=all，包含继承关系时明确设置 include_inherited=true。
+   仅当当前消息是 /guild 创建 或 /guild create 命令时调用 create_guild_node；
+   创建者由程序绑定当前发命令的人，不能从历史、@目标或参数指定。每条命令只创建一个节点。
+   用户用普通消息要求创建时，提示其发送 /guild 创建 ...；不能通过定时任务代为创建。
+   创建前需明确标题和父节点，不能根据模糊名称猜测节点 ID；没有指定负责人时默认创建者负责。
 9. 本地联系人资料只记录自定义称呼（display_name）、观察到的昵称（nickname）和备注。
     姓名、subject（sub）、领域角色和职务以 get_member_identity 返回的 Keycloak 数据为准；
     不得依据昵称或备注猜测绑定，未绑定不代表不能正常聊天。介绍成员或任务负责人时使用
