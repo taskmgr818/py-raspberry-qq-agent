@@ -10,7 +10,7 @@ from .assignments import AssignmentNotifications
 from .config import AppConfig
 from .contacts import ContactDirectory, RoleStore
 from .digest import GroupDigestService
-from .guild import DueReminders, GuildRepository, WindowPoller
+from .guild import DueReminders, GuildRepository, GuildService, WindowPoller
 from .guild_reports import WeeklyReports
 from .incoming import IncomingService
 from .keycloak import KeycloakDirectory
@@ -166,6 +166,17 @@ class Application:
         await self.mcp.start()
         if self.config.keycloak.enabled or self.config.guild.enabled:
             self.identities = KeycloakDirectory(self.config.keycloak)
+        repository = None
+        guild_service = None
+        if self.config.guild.enabled:
+            assert self.identities is not None
+            repository = GuildRepository(self.config.guild.database_url)
+            guild_service = GuildService(
+                self.config.guild,
+                repository,
+                self.identities,
+                ZoneInfo(self.config.timezone),
+            )
         registry = build_tool_registry(
             config=self.config,
             schedules=self.schedules,
@@ -176,6 +187,7 @@ class Application:
             chat_directory=self.chat_directory,
             mcp=self.mcp,
             identities=self.identities,
+            guild_service=guild_service,
         )
         self.worker = AgentWorker(
             AgentRunner(self.config, self.main_llm, registry),
@@ -194,7 +206,7 @@ class Application:
         self.napcat.start()
         if self.config.guild.enabled:
             assert self.identities is not None
-            repository = GuildRepository(self.config.guild.database_url)
+            assert repository is not None
             self.weekly_reports = WeeklyReports(
                 self.config,
                 repository,

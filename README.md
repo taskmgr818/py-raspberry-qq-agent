@@ -108,13 +108,14 @@ Keycloak 是成员身份的权威来源，维护姓名、`subject`（OIDC sub）
 介绍成员和展示任务负责人时使用 Keycloak 姓名，日常称呼可用本地称呼，缺失时回退到 QQ 昵称。
 不能用昵称、姓名或备注猜测 QQ 绑定。
 
-领域角色和职务仅供身份展示，不改变 Bot 权限。Bot 管理员仍由独立的 `RoleStore` 和运维 CLI
-管理，模型既不能修改管理员权限，也不能修改 Keycloak 身份。
+职务仅供展示。guild 工具通过 `bitnp-authz` 解析 Keycloak 的 `permission-*` 角色判断准入和权限，
+不改变 Bot 权限。Bot 管理员仍由独立的 `RoleStore` 和运维 CLI 管理，模型既不能修改管理员权限，
+也不能修改 Keycloak 身份；Bot 管理员不自动获得 guild 管理权限。
 
 入站消息和历史会保留有序的 `mentions`，每项包含 `marker` 与 `contact_id`。
 正文中的 `@1`、`@2` 对应各项目标；`@全体成员` 不产生用户身份，入站时 @机器人只用于路由。
 CQ 字符串和数组消息共用解析逻辑。旧历史没有目标信息，不能从已被删去的 @内容恢复。
-后续可直接通过 QQ 绑定得到的 `subject` 接入 guild，本次未增加 guild 任务查询工具。
+guild 工具通过 QQ 绑定得到的 `subject` 查询任务，返回的负责人和成员也使用 Keycloak 姓名。
 
 ```bash
 uv run --env-file .env py-raspberry-qq-agent --config config.yaml admin add --qq 123456789
@@ -207,10 +208,55 @@ uv run python -m compileall -q src
 
 测试覆盖消息分流、允许列表、模型引用边界、工具调用、任务失败后继续处理、发送间隔、定时配置、报告输出及 MCP 上传。
 
+## Guild 工具与命令
+
+`guild.enabled` 同时启用 agent 工具和已有的提醒、周报。实现统一在 `guild.py`：
+`GuildRepository` 管理 PostgreSQL 访问，`GuildService` 处理身份、权限、参数和展示。
+agent 直接访问 guild 数据库，不依赖 guild HTTP API。guild-go 继续维护原有表结构迁移。
+
+| 工具 | 用途 |
+| --- | --- |
+| `list_guild_nodes` | 查询本人、指定成员或全站的任务与待办 |
+| `get_guild_node` | 查看节点详情、创建者、直接负责人和成员 |
+| `list_guild_activity` | 查询全站或指定节点最近的新建、评论和描述变更 |
+| `create_guild_node` | 执行当前发送者的创建命令 |
+
+群里需要 @机器人，私聊直接发送。例如：
+
+```text
+/guild 我的待办
+/guild 查 @某人的任务
+/guild 系统最近有什么动态
+/guild 创建 在节点 123 下建立“设备巡检”，由 @某人负责，下周五截止
+```
+
+明确的 `/guild` 命令跳过重要性分类，仍检查聊天允许列表和私聊、群聊 @ 开关。
+查询工具也可用于当前发送者的普通提问；创建只接受 `/guild 创建 ...` 或 `/guild create ...`。
+操作者来自当前 QQ 消息的真实发送者，由程序传入工具，模型不能通过参数指定创建者。
+定时任务、历史消息和被 @ 的成员不能替代操作者。每条创建命令只创建一个节点。
+
+查询默认 `scope=mine`、`status=open`、直接关系；查别人用 `scope=user` 和已知 `subject`，
+查全站待办用 `scope=all`。`relation` 可选 `leader`、`member`、`any`（默认）；
+`include_inherited=true` 时，负责人关系向下、参与关系向上展开，负责人优先于普通成员。
+列表按截止时间排序，无截止时间的放最后；支持逾期、标题、父节点过滤，以及 `page`、`page_size` 分页，
+默认每页 20，最多 50，返回 `has_more` 和 `next_page`。省略 `parent_id` 不过滤，显式 `null` 只看根节点。
+最近动态来自当前保留的节点、评论和描述历史，不是完整审计日志；动态正文最多返回 1000 字符。
+
+所有交互工具要求发送者有有效 Keycloak 绑定和 guild 准入权限。创建时重新查询身份和角色，
+根节点要求 manager，子节点要求父节点或祖先的负责人，系统管理员可以创建任意子节点。
+未指定负责人时默认创建者负责；不会自动复制父节点直接成员。指定的负责人和成员也须是启用、
+具有准入权限的 Keycloak 用户，但不要求他们绑定 QQ 或先登录 guild 网页。
+
+创建使用专门的写连接，在同一事务中补录 `users`、创建节点和成员关系、记录非空初始描述、
+更新父节点时间。普通查询、提醒和周报连接继续强制只读，查询不会自动补录用户。
+首次创建会初始化 agent 自有的 `qq_agent_guild_commands` 回执表，数据库账号需要建该表及相应写入权限。
+回执与节点一起提交，以聊天类型、聊天 ID、消息 ID 去重（缺消息 ID 时使用当前任务 ID），
+重试返回原结果；同一消息修改参数会被拒绝。回执在节点被删除后仍保留，避免迟到重试再次建节点。
+
 ## 看板到期提醒
 
 `guild.enabled` 启用看板集成，通过 PostgreSQL 直接读取 `guild-go` 的节点和直接负责人。
-数据库连接强制只读。Keycloak 使用独立服务账号，读取 `subject` 对应用户的 `qq_number` 属性；
+提醒和周报的数据库连接强制只读。Keycloak 使用独立服务账号，读取 `subject` 对应用户的 `qq_number` 属性；
 该属性由管理员维护，Bot 不修改用户资料。禁用、删除或未绑定 QQ 的账号跳过并记录原因。
 用户资料缓存 5 分钟，查不到的用户缓存 30 秒。
 

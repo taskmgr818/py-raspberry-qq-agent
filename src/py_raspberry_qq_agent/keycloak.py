@@ -103,7 +103,11 @@ class KeycloakDirectory:
         )
 
     async def lookup_user(
-        self, *, qq: str | None = None, subject: str | None = None
+        self,
+        *,
+        qq: str | None = None,
+        subject: str | None = None,
+        refresh: bool = False,
     ) -> User | None:
         """Look up an enabled member by exactly one identifier, without roles."""
         if (qq is None) == (subject is None):
@@ -111,17 +115,17 @@ class KeycloakDirectory:
         if subject is not None:
             if not isinstance(subject, str) or not subject.strip():
                 raise ValueError("subject must be a non-empty string")
-            return await self._user_by_subject(subject.strip())
+            return await self._user_by_subject(subject.strip(), refresh=refresh)
         if not isinstance(qq, str) or not re.fullmatch(r"[1-9][0-9]{4,19}", qq.strip()):
             raise ValueError(
                 "QQ must be a string of 5–20 ASCII digits without leading zero"
             )
-        return await self._user_by_qq(qq.strip())
+        return await self._user_by_qq(qq.strip(), refresh=refresh)
 
-    async def _user_by_subject(self, subject: str) -> User | None:
+    async def _user_by_subject(self, subject: str, *, refresh: bool) -> User | None:
         key = ("subject", subject)
         cached = self._cache.get(key)
-        if cached and time.monotonic() < cached[0]:
+        if not refresh and cached and time.monotonic() < cached[0]:
             return cached[1]
         try:
             data = await self._get("/users/" + quote(subject, safe=""))
@@ -134,10 +138,10 @@ class KeycloakDirectory:
         self._store(key, user)
         return user
 
-    async def _user_by_qq(self, qq: str) -> User | None:
+    async def _user_by_qq(self, qq: str, *, refresh: bool) -> User | None:
         key = ("qq", qq)
         cached = self._cache.get(key)
-        if cached and time.monotonic() < cached[0]:
+        if not refresh and cached and time.monotonic() < cached[0]:
             return cached[1]
         matches: dict[str, User] = {}
         first = 0
@@ -169,10 +173,10 @@ class KeycloakDirectory:
             self._store(("subject", user.subject), user)
         return user
 
-    async def realm_roles(self, subject: str) -> list[str]:
+    async def realm_roles(self, subject: str, *, refresh: bool = False) -> list[str]:
         key = ("roles", subject)
         cached = self._cache.get(key)
-        if cached and time.monotonic() < cached[0]:
+        if not refresh and cached and time.monotonic() < cached[0]:
             return list(cached[1])
         data = await self._get(
             "/users/" + quote(subject, safe="") + "/role-mappings/realm/composite"

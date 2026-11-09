@@ -14,6 +14,7 @@ from bitnp_authz import positions_from_roles
 
 from .config import AppConfig
 from .contacts import ContactDirectory
+from .guild import GuildService
 from .keycloak import AmbiguousQQBinding, KeycloakDirectory
 from .knowledge import KnowledgeBase
 from .mcp_runtime import McpManager
@@ -21,9 +22,10 @@ from .messages import MessageStore
 from .model_boundary import ModelIds
 from .napcat import NapCatClient, OutboundQueue, parse_message_content
 from .scheduler import ScheduleStore
+from .tasks import AgentTask
 
 LOGGER = logging.getLogger(__name__)
-ToolHandler = Callable[[dict[str, Any]], Awaitable[Any]]
+ToolHandler = Callable[..., Awaitable[Any]]
 
 
 @dataclass(slots=True)
@@ -33,6 +35,7 @@ class Tool:
     input_schema: dict[str, Any]
     handler: ToolHandler
     contact_refs: bool = False
+    task_context: bool = False
 
     def openai_definition(self) -> dict[str, Any]:
         return {
@@ -58,13 +61,19 @@ class ToolRegistry:
     def definitions(self) -> list[dict[str, Any]]:
         return [tool.openai_definition() for tool in self._tools.values()]
 
-    async def execute(self, name: str, arguments: dict[str, Any]) -> Any:
+    async def execute(
+        self, name: str, arguments: dict[str, Any], *, task: AgentTask | None = None
+    ) -> Any:
         tool = self._tools.get(name)
         if tool is None:
             raise KeyError(f"unknown tool: {name}")
-        if tool.contact_refs:
-            return self.ids.encode(await tool.handler(self.ids.decode(arguments)))
-        return await tool.handler(arguments)
+        args = self.ids.decode(arguments) if tool.contact_refs else arguments
+        result = (
+            await tool.handler(args, task)
+            if tool.task_context
+            else await tool.handler(args)
+        )
+        return self.ids.encode(result) if tool.contact_refs else result
 
 
 class HistoryService:
@@ -302,6 +311,7 @@ def build_tool_registry(
     chat_directory: ChatDirectoryService,
     mcp: McpManager,
     identities: KeycloakDirectory | None = None,
+    guild_service: GuildService | None = None,
 ) -> ToolRegistry:
     registry = ToolRegistry()
 
@@ -616,6 +626,100 @@ def build_tool_registry(
             contact_refs=True,
         )
     )
+
+    if guild_service is not None:
+        pagination = {
+            "page": {"type": "integer", "minimum": 1},
+            "page_size": {"type": "integer", "minimum": 1, "maximum": 50},
+        }
+        node_id_schema = {"type": "integer", "minimum": 1}
+        parent_schema = {"type": ["integer", "null"], "minimum": 1}
+        subject_list = {"type": "array", "items": {"type": "string"}, "maxItems": 100}
+        for name, description, schema, handler in (
+            (
+                "list_guild_nodes",
+                (
+                    "查询任务和待办，默认当前发送者直接参与的未完成节点。scope=mine/user/all；"
+                    "user 必须提供已知 subject，all 查询系统待办。relation=leader/member/any；"
+                    "include_inherited=true 包含向下负责、向上参与的继承关系。"
+                    "overdue=true 仅查逾期；parent_id=null 仅查根节点。按截止时间排序，支持分页。"
+                ),
+                _object_schema(
+                    {
+                        **pagination,
+                        "scope": {"type": "string", "enum": ["mine", "user", "all"]},
+                        "subject": {"type": "string"},
+                        "relation": {
+                            "type": "string",
+                            "enum": ["leader", "member", "any"],
+                        },
+                        "status": {
+                            "type": "string",
+                            "enum": ["open", "completed", "all"],
+                        },
+                        "include_inherited": {"type": "boolean"},
+                        "overdue": {"type": "boolean"},
+                        "parent_id": parent_schema,
+                        "query": {"type": "string", "description": "标题包含的文字"},
+                    }
+                ),
+                guild_service.list_nodes,
+            ),
+            (
+                "get_guild_node",
+                "查询 guild 节点详情、创建者和直接负责人/成员。node_id 必须来自已知节点或查询结果。",
+                _object_schema({"node_id": node_id_schema}, ["node_id"]),
+                guild_service.get_node,
+            ),
+            (
+                "list_guild_activity",
+                (
+                    "查询全站或指定节点最近动态：新建节点、评论、描述变更。"
+                    "按时间倒序分页；since 为 ISO 8601 时间。它不是完整的操作审计记录。"
+                ),
+                _object_schema(
+                    {
+                        **pagination,
+                        "node_id": node_id_schema,
+                        "since": {"type": "string"},
+                    }
+                ),
+                guild_service.list_activity,
+            ),
+            (
+                "create_guild_node",
+                (
+                    "执行当前发送者的 /guild 创建 或 /guild create 命令。"
+                    "创建者由程序绑定当前发送者，不能指定或代替别人。"
+                    "parent_id 不填或为 null 时创建根节点；未指定负责人时由创建者负责。"
+                    "负责人和成员使用已验证的 Keycloak subject，不能重叠；不会自动继承父节点直接成员。"
+                    "同一消息只创建一个节点，重复调用返回原结果；参数不足或父节点不明确时先询问用户。"
+                ),
+                _object_schema(
+                    {
+                        "parent_id": parent_schema,
+                        "title": {"type": "string", "minLength": 1, "maxLength": 200},
+                        "description": {"type": "string", "maxLength": 20000},
+                        "due_at": {
+                            "type": ["string", "null"],
+                            "description": "ISO 8601；无时区时使用配置时区",
+                        },
+                        "tags": {
+                            "type": "array",
+                            "maxItems": 10,
+                            "items": {"type": "string", "maxLength": 32},
+                        },
+                        "leader_subjects": subject_list,
+                        "member_subjects": subject_list,
+                    },
+                    ["title"],
+                ),
+                guild_service.create_node,
+            ),
+        ):
+            registry.register(
+                Tool(name, description, schema, handler, task_context=True)
+            )
 
     async def get_contact_profile(args: dict[str, Any]) -> dict[str, Any]:
         return contacts.get(_required_str(args, "contact_id"))

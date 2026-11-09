@@ -9,6 +9,7 @@ from typing import Any
 from .allowlist import ChatAllowlist
 from .config import AppConfig
 from .contacts import ContactDirectory, RoleStore
+from .guild import guild_command
 from .llm import LlmError, OpenAICompatibleClient, extract_json_object
 from .messages import MessageStore
 from .model_boundary import ModelIds
@@ -59,6 +60,9 @@ class ImportanceGate:
             return ImportanceDecision(False, "私聊自动回复已关闭", "routing")
         if chat_type == "group" and not self._config.group_mention_enabled:
             return ImportanceDecision(False, "群聊 @ 自动回复已关闭", "routing")
+
+        if self._config.guild.enabled and guild_command(content):
+            return ImportanceDecision(True, "明确的 guild 命令", "command")
 
         role = self._roles.role_of(sender_id)
         if role == "admin":

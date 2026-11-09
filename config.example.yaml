@@ -148,6 +148,8 @@ keycloak:
 
 guild:
   enabled: false
+  # Shared by interactive guild tools, reminders and reports. Node creation needs
+  # write access and permission to create the agent's command receipt table.
   database_url: ${GUILD_DATABASE_URL:-}
   public_url: ${GUILD_PUBLIC_URL:-}
   poll_seconds: 60
