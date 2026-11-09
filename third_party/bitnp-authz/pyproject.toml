@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bitnp-authz"
+dynamic = ["version"]
+description = "Keycloak realm 角色 → 成员身份、管理权限、部门与职务（纯计算，无依赖）"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = []
+
+[tool.setuptools]
+packages = ["bitnp_authz"]
+
+[tool.setuptools.dynamic]
+version = {attr = "bitnp_authz.__version__"}
+
+[tool.setuptools.package-data]
+bitnp_authz = ["py.typed"]

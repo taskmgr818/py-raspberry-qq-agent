@@ -32,7 +32,7 @@ async def test_business_notifications_deliver_outside_model_allowlist(
     repository.query.return_value = [row]
     repository.due.return_value = [row]
     directory = AsyncMock()
-    directory.user.return_value = User("alice", "Alice", "54321")
+    directory.lookup_user.return_value = User("alice", "Alice", "54321")
     napcat = AsyncMock()
     outbound = OutboundQueue(
         config,
@@ -50,6 +50,8 @@ async def test_business_notifications_deliver_outside_model_allowlist(
         await asyncio.wait_for(outbound._queue.join(), timeout=1)
         napcat.send_private.assert_awaited_once()
         assert napcat.send_private.call_args.args[0] == "54321"
+        directory.lookup_user.assert_awaited_once_with(subject="alice")
+        directory.realm_roles.assert_not_awaited()
         with pytest.raises(PermissionError):
             outbound.enqueue("private", "54321", "model message")
     finally:
@@ -92,7 +94,7 @@ async def test_due_uses_one_day_trigger_and_continues_past_unbound_or_failed_sen
         for i in range(3)
     ]
     directory = AsyncMock()
-    directory.user.side_effect = [
+    directory.lookup_user.side_effect = [
         User("0", "Unbound", None),
         User("1", "Broken", "12345"),
         User("2", "Works", "54321"),
@@ -167,10 +169,10 @@ async def test_keycloak_read_only_binding_cache_disabled_user_and_token_refresh(
     await directory._http.aclose()
     directory._http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     try:
-        assert (await directory.user("alice")).qq == "12345"
-        assert (await directory.user("alice")).name == "Alice"
+        assert (await directory.lookup_user(subject="alice")).qq == "12345"
+        assert (await directory.lookup_user(subject="alice")).name == "Alice"
         assert counts == {"token": 2, "users": 2}
-        assert await directory.user("disabled") is None
-        assert (await directory.user("ambiguous")).qq is None
+        assert await directory.lookup_user(subject="disabled") is None
+        assert (await directory.lookup_user(subject="ambiguous")).qq is None
     finally:
         await directory.close()

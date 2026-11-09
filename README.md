@@ -95,7 +95,26 @@ NapCat 的 OneBot HTTP/WebSocket 端口不发布。Agent 无需发布端口或�
 消息正文、昵称和备注是普通文本，不承诺检测其中人为填写的号码。
 外部 MCP 工具保留各自的参数语义，不套用 QQ 字段转换。
 
-联系人备注与管理员授权分开存储，模型只能编辑备注，不能修改授权。
+Keycloak 是成员身份的权威来源，维护姓名、`subject`（OIDC sub）、QQ 绑定、领域角色和职务。
+本地联系人只保存自定义称呼（兼容字段 `display_name`）、观察到的 QQ 昵称（`nickname`）和备注；
+它不是成员库，也不保存 Keycloak 身份副本。昵称变化不会覆盖自定义称呼，历史 `display_name`
+原样保留为本地称呼。未绑定 Keycloak 的联系人仍可正常聊天和记备注。
+
+`get_contact_profile`、`update_contact_profile`、联系人列表及搜索只操作本地资料。
+独立的 `get_member_identity` 接受已有用户引用 `contact_id`，或用户已经明确提供的字符串 `qq`，
+或已知的 `subject`（OIDC sub），三选一；返回 Keycloak 姓名、`subject`、有效 `realm_roles`
+和 `positions`。按 `subject` 查询不要求成员绑定 QQ，未绑定时返回 `contact_id: null`。模型通常使用
+发送者引用或消息 `mentions` 中的 `contact_id`，程序在内部还原 QQ；工具结果继续返回用户引用。
+介绍成员和展示任务负责人时使用 Keycloak 姓名，日常称呼可用本地称呼，缺失时回退到 QQ 昵称。
+不能用昵称、姓名或备注猜测 QQ 绑定。
+
+领域角色和职务仅供身份展示，不改变 Bot 权限。Bot 管理员仍由独立的 `RoleStore` 和运维 CLI
+管理，模型既不能修改管理员权限，也不能修改 Keycloak 身份。
+
+入站消息和历史会保留有序的 `mentions`，每项包含 `marker` 与 `contact_id`。
+正文中的 `@1`、`@2` 对应各项目标；`@全体成员` 不产生用户身份，入站时 @机器人只用于路由。
+CQ 字符串和数组消息共用解析逻辑。旧历史没有目标信息，不能从已被删去的 @内容恢复。
+后续可直接通过 QQ 绑定得到的 `subject` 接入 guild，本次未增加 guild 任务查询工具。
 
 ```bash
 uv run --env-file .env py-raspberry-qq-agent --config config.yaml admin add --qq 123456789
@@ -250,9 +269,43 @@ Bot 不维护成员快照、事件表或去重存储。两次查询间被移除�
 
 ## 配置 Keycloak
 
+成员查询可独立于 guild 启用：
+
+```yaml
+keycloak:
+  enabled: ${KEYCLOAK_ENABLED:-false}
+  issuer: ${OIDC_ISSUER}
+  admin_url: ${KEYCLOAK_ADMIN_URL}
+  client_id: ${BOT_KEYCLOAK_CLIENT_ID}
+  client_secret: ${BOT_KEYCLOAK_CLIENT_SECRET}
+  qq_attribute: qq_number
+```
+
+设置 `KEYCLOAK_ENABLED=true` 即可使用；启用 guild 也会启用同一个用户目录，无需重复配置。
+启用时必须提供完整服务账号配置。后台 guild 通知和 agent 工具共用目录、HTTP 连接和缓存。
+管理员账户只用于下述配置脚本，不传给运行中的 Bot。
+
+agent 和后台任务统一调用 `KeycloakDirectory.lookup_user(qq=...)` 或
+`lookup_user(subject=...)`，两个参数必须且只能提供一个；基础查询不读取角色。
+agent 工具在基础资料上补充角色和职务，后台通知仅在用户有有效 QQ 绑定时发送，周报查询姓名不要求 QQ 绑定。
+
+`get_member_identity` 的 `status` 为 `found`、`not_found`、`ambiguous`、`unavailable` 或
+`disabled`。按 QQ 查询仅使用启用用户的单值、格式有效、精确匹配的 QQ 绑定；多个启用用户绑定同一 QQ
+会返回 `ambiguous`，不能选第一条。`not_found` 表示按 QQ 无有效绑定，或按 `subject` 用户不存在或已禁用，
+不等于 Keycloak 服务故障。
+成功和无匹配结果分别缓存 5 分钟和 30 秒；服务故障不缓存为“未找到”。
+
+有效领域角色通过 Keycloak `/users/{id}/role-mappings/realm/composite` 读取。
+职务使用 `bitnp-authz` Python 包的 `positions_from_roles()` 解析，与 guild 固定到同一上游提交
+`643da5d210aa`；不另行维护角色名称、部门或职务优先级规则。Python 包源码已放入
+`third_party/bitnp-authz`，uv 和 Docker 构建均使用本地路径，不需要访问私有仓库。
+来源和更新方式见 [third_party/README.md](third_party/README.md)。
+
 `scripts/configure_keycloak.py` 默认只预览计划。它添加管理员可维护的单值 `qq_number` 属性，
-创建独立 `qq-bot` client，启用服务账号并授予用户只读角色及相应 client scope。
-不向普通登录 token 添加 QQ mapper，不修改任何现有用户的 QQ 绑定，也不覆盖已有同名 client。
+创建或补配独立 `qq-bot` client，启用服务账号并授予用户只读角色及相应 client scope。
+已有安全的 QQ 属性定义原样保留，包括显示名称、注解及用户查看权限；已有 client 仅更新
+预览列出的字段、补充缺失角色和 scope，保留其他配置及现有 secret，不重置 secret。
+不向普通登录 token 添加 QQ mapper，不修改任何现有用户的 QQ 绑定。
 
 ```bash
 uv run --env-file ../guild-go/.env --env-file ../keycloak.env python scripts/configure_keycloak.py
@@ -261,6 +314,7 @@ uv run --env-file ../guild-go/.env --env-file ../keycloak.env python scripts/con
 
 `keycloak.env` 提供临时管理员的 `user`、`password`；`guild-go/.env` 提供 `OIDC_ISSUER`。
 服务账号凭据只写入 `data/keycloak-bot.env`，文件权限 0600。可用多个 `--env-file` 同时加载 Bot 自身配置和该文件。
+重复执行时若凭据文件一致会保留；若文件内容不同则在修改服务器前退出，可指定新的 `--output`。
 QQ 号由管理员在 Keycloak 用户属性中填写，Bot 本地联系人资料不能修改绑定。
 Keycloak 默认的用户只读管理角色能读取 realm 用户资料，并不是字段级授权；Bot 运行时只读取所需用户。
 

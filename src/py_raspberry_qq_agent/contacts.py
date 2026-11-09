@@ -7,7 +7,7 @@ from .storage import atomic_write_json, read_json
 
 
 class ContactDirectory:
-    """Agent-editable contact profiles, separate from immutable authorization roles."""
+    """Local aliases and notes, plus observed QQ nicknames; never member identity."""
 
     def __init__(self, path: Path) -> None:
         self._path = path
@@ -22,6 +22,7 @@ class ContactDirectory:
             "found": contact_id in self._profiles,
             "contact_id": contact_id,
             "display_name": profile.get("display_name", ""),
+            "nickname": profile.get("nickname", ""),
             "notes": profile.get("notes", ""),
             "updated_at": profile.get("updated_at", ""),
         }
@@ -30,8 +31,9 @@ class ContactDirectory:
         if not nickname.strip():
             return
         profile = self._profiles.setdefault(contact_id, {})
-        if not profile.get("display_name"):
-            profile["display_name"] = nickname.strip()[:128]
+        nickname = nickname.strip()[:128]
+        if profile.get("nickname") != nickname:
+            profile["nickname"] = nickname
             profile["updated_at"] = datetime.now(UTC).isoformat()
             self._save()
 
@@ -72,13 +74,14 @@ class ContactDirectory:
                     (
                         str(item["contact_id"]),
                         str(item["display_name"]),
+                        str(item["nickname"]),
                         str(item["notes"]),
                     )
                 ).casefold()
             ]
         items.sort(
             key=lambda item: (
-                str(item["display_name"]).casefold(),
+                str(item["display_name"] or item["nickname"]).casefold(),
                 str(item["contact_id"]),
             )
         )

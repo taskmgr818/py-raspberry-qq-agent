@@ -164,6 +164,8 @@ class Application:
 
     async def start(self) -> None:
         await self.mcp.start()
+        if self.config.keycloak.enabled or self.config.guild.enabled:
+            self.identities = KeycloakDirectory(self.config.keycloak)
         registry = build_tool_registry(
             config=self.config,
             schedules=self.schedules,
@@ -173,6 +175,7 @@ class Application:
             history=self.history,
             chat_directory=self.chat_directory,
             mcp=self.mcp,
+            identities=self.identities,
         )
         self.worker = AgentWorker(
             AgentRunner(self.config, self.main_llm, registry),
@@ -190,7 +193,7 @@ class Application:
         self.digest.start()
         self.napcat.start()
         if self.config.guild.enabled:
-            self.identities = KeycloakDirectory(self.config.keycloak)
+            assert self.identities is not None
             repository = GuildRepository(self.config.guild.database_url)
             self.weekly_reports = WeeklyReports(
                 self.config,
@@ -254,8 +257,6 @@ class Application:
             await self.assignment_poller.stop()
         if self.weekly_reports:
             await self.weekly_reports.stop()
-        if self.identities:
-            await self.identities.close()
         await self.napcat.stop()
         await self.digest.stop()
         if self.scheduler is not None and self.config.scheduler_enabled:
@@ -265,6 +266,8 @@ class Application:
             await self.message_gateway.close()
         if self.worker is not None:
             await self.worker.stop()
+        if self.identities:
+            await self.identities.close()
         await self.mcp.stop()
         await self.main_llm.close()
         await self.classifier_llm.close()

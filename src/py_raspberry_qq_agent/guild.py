@@ -127,7 +127,7 @@ async def notify(
     directory: KeycloakDirectory, outbound: OutboundQueue, subject: str, content: str
 ) -> None:
     try:
-        user = await directory.user(subject)
+        user = await directory.lookup_user(subject=subject)
         if user is None or not user.qq:
             LOGGER.warning(
                 "notification skipped: no enabled QQ binding subject=%s", subject

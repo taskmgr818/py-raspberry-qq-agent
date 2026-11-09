@@ -1,7 +1,7 @@
 """Preview/apply the QQ attribute and a dedicated read-only Bot service account.
 
 uv run --env-file ../guild-go/.env --env-file ../keycloak.env python scripts/configure_keycloak.py
-Append --apply to write. No user bindings or existing clients are modified.
+Append --apply to write. Existing QQ profile metadata and client secrets are preserved.
 """
 
 from __future__ import annotations
@@ -52,15 +52,18 @@ def main() -> None:
         existing = next(
             (a for a in profile["attributes"] if a["name"] == "qq_number"), None
         )
-        if existing and existing != attribute:
+        if existing and (
+            existing.get("multivalued", False)
+            or existing.get("permissions", {}).get("edit") != ["admin"]
+            or existing.get("validations", {}).get("pattern")
+            != attribute["validations"]["pattern"]
+        ):
             raise SystemExit(
-                "qq_number already exists with different settings; inspect it before applying"
+                "qq_number must be single-valued, admin-editable only, and use the QQ pattern; "
+                "inspect it before applying"
             )
         clients = get("/clients")
-        if any(c["clientId"] == args.client_id for c in clients):
-            raise SystemExit(
-                "Bot client already exists; inspect it rather than overwriting its settings"
-            )
+        current = next((c for c in clients if c["clientId"] == args.client_id), None)
         management = next(
             (c for c in clients if c["clientId"] == "realm-management"), None
         )
@@ -80,14 +83,54 @@ def main() -> None:
             "standardFlowEnabled": False,
             "directAccessGrantsEnabled": False,
             "fullScopeAllowed": False,
+            "clientAuthenticatorType": "client-secret",
         }
+        if current:
+            current = get("/clients/" + current["id"])
+        changes = {
+            key: value
+            for key, value in client.items()
+            if current is None or current.get(key) != value
+        }
+        scope_path = "/scope-mappings/clients/" + management["id"]
+        account_path = "/role-mappings/clients/" + management["id"]
+        scope_roles = get("/clients/" + current["id"] + scope_path) if current else []
+        account = (
+            get("/clients/" + current["id"] + "/service-account-user")
+            if current and current.get("serviceAccountsEnabled")
+            else None
+        )
+        account_roles = get("/users/" + account["id"] + account_path) if account else []
+        needs_scope = not any(r["id"] == role["id"] for r in scope_roles)
+        needs_role = not any(r["id"] == role["id"] for r in account_roles)
+        secret = (
+            get("/clients/" + current["id"] + "/client-secret")["value"]
+            if current and current.get("clientAuthenticatorType") == "client-secret"
+            else None
+        )
+
+        def credentials(value: str) -> str:
+            return (
+                "BOT_KEYCLOAK_CLIENT_ID="
+                + args.client_id
+                + "\nBOT_KEYCLOAK_CLIENT_SECRET="
+                + value
+                + "\n"
+            )
+
         print(
             json.dumps(
                 {
                     "realm": realm,
-                    "attribute": attribute,
-                    "client": client,
+                    "attribute": existing or attribute,
+                    "attribute_action": "preserve" if existing else "create",
+                    "client_action": ("update" if changes else "preserve")
+                    if current
+                    else "create",
+                    "client_changes": changes,
                     "service_account_role": management["clientId"] + ":view-users",
+                    "add_service_account_role": needs_role,
+                    "add_client_scope": needs_scope,
                     "credentials_file": str(args.output),
                     "apply": args.apply,
                 },
@@ -97,35 +140,44 @@ def main() -> None:
         )
         if not args.apply:
             return
-        if args.output.exists():
+        if args.output.exists() and (
+            secret is None or args.output.read_text() != credentials(secret)
+        ):
             raise SystemExit(
-                "Credential output already exists; refusing to overwrite it"
+                "Credential output exists with different contents; use a new --output path"
             )
         args.output.parent.mkdir(parents=True, exist_ok=True)
-        # Reserve a private credential file before making server changes.
-        descriptor = os.open(args.output, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        with os.fdopen(descriptor, "w") as output:
-            if not existing:
-                profile["attributes"].append(attribute)
-                response = http.put(admin + "/users/profile", json=profile)
-                response.raise_for_status()
+        if not existing:
+            profile["attributes"].append(attribute)
+            response = http.put(admin + "/users/profile", json=profile)
+            response.raise_for_status()
+        if current is None:
             response = http.post(admin + "/clients", json=client)
             response.raise_for_status()
             client_id = get("/clients?clientId=" + args.client_id)[0]["id"]
+        else:
+            client_id = current["id"]
+            if changes:
+                response = http.put(admin + "/clients/" + client_id, json=changes)
+                response.raise_for_status()
+        if account is None:
             account = get("/clients/" + client_id + "/service-account-user")
-            for path in [
-                "/clients/" + client_id + "/scope-mappings/clients/" + management["id"],
-                "/users/"
-                + account["id"]
-                + "/role-mappings/clients/"
-                + management["id"],
-            ]:
+        for needed, path in [
+            (needs_scope, "/clients/" + client_id + scope_path),
+            (needs_role, "/users/" + account["id"] + account_path),
+        ]:
+            if needed:
                 response = http.post(admin + path, json=[role])
                 response.raise_for_status()
+        if secret is None:
             secret = get("/clients/" + client_id + "/client-secret")["value"]
-            # Secrets are written locally, never printed.
-            output.write("BOT_KEYCLOAK_CLIENT_ID=" + args.client_id + "\n")
-            output.write("BOT_KEYCLOAK_CLIENT_SECRET=" + secret + "\n")
+        if not args.output.exists():
+            descriptor = os.open(
+                args.output, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600
+            )
+            with os.fdopen(descriptor, "w") as output:
+                # Secrets are written locally, never printed or regenerated.
+                output.write(credentials(secret))
         args.output.chmod(0o600)
         print(
             "Applied. Credentials saved with mode 0600; no user QQ bindings were changed."

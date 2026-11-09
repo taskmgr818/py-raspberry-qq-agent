@@ -40,3 +40,19 @@ def test_profiles_support_non_friends_search_and_pagination(tmp_path: Path) -> N
 
     assert profiles.remove(aliases[3]) is True
     assert profiles.get(aliases[3])["found"] is False
+
+
+def test_observed_nickname_does_not_become_or_replace_local_alias(tmp_path: Path):
+    profiles = ContactDirectory(tmp_path / "profiles.json")
+    profiles.observe_nickname("10001", "QQ Nickname")
+    assert profiles.get("10001")["display_name"] == ""
+    assert profiles.get("10001")["nickname"] == "QQ Nickname"
+    profiles.update("10001", "Local alias", "Local note")
+    profiles.observe_nickname("10001", "Changed nickname")
+    assert profiles.get("10001")["display_name"] == "Local alias"
+    assert profiles.get("10001")["nickname"] == "Changed nickname"
+    assert profiles.page(query="Changed nickname")["total"] == 1
+    assert (
+        ContactDirectory(tmp_path / "profiles.json").get("10001")["notes"]
+        == "Local note"
+    )

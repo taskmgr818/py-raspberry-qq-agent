@@ -57,10 +57,7 @@ class ImportanceGate:
             return ImportanceDecision(False, "群消息没有 @ 机器人", "routing")
         if chat_type == "private" and not self._config.private_enabled:
             return ImportanceDecision(False, "私聊自动回复已关闭", "routing")
-        if (
-            chat_type == "group"
-            and not self._config.group_mention_enabled
-        ):
+        if chat_type == "group" and not self._config.group_mention_enabled:
             return ImportanceDecision(False, "群聊 @ 自动回复已关闭", "routing")
 
         role = self._roles.role_of(sender_id)
@@ -96,6 +93,7 @@ class ImportanceGate:
             "role": role,
             "profile": {
                 "display_name": profile.get("display_name", ""),
+                "nickname": profile.get("nickname", ""),
                 "notes": profile.get("notes", ""),
             },
             "message": content[: self._config.classifier_message_chars],

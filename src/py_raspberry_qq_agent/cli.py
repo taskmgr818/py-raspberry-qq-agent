@@ -44,7 +44,9 @@ def main() -> None:
     profile_sub = profile.add_subparsers(dest="profile_action", required=True)
     profile_set = profile_sub.add_parser("set", help="Create or update a profile")
     profile_set.add_argument("--qq", required=True)
-    profile_set.add_argument("--name")
+    profile_set.add_argument(
+        "--name", help="Local alias; does not change the Keycloak name"
+    )
     profile_set.add_argument("--notes")
     profile_get = profile_sub.add_parser("get", help="Show a profile")
     profile_get.add_argument("--qq", required=True)

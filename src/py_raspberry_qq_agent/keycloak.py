@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import asyncio
+import re
 import time
 from dataclasses import dataclass
+from typing import Any
 from urllib.parse import quote
 
 import httpx
@@ -14,6 +17,7 @@ class KeycloakConfig:
     client_id: str = ""
     client_secret: str = ""
     qq_attribute: str = "qq_number"
+    enabled: bool = False
 
 
 @dataclass(slots=True)
@@ -21,6 +25,10 @@ class User:
     subject: str
     name: str
     qq: str | None
+
+
+class AmbiguousQQBinding(ValueError):
+    """Multiple enabled members have the same QQ binding."""
 
 
 class KeycloakDirectory:
@@ -31,12 +39,17 @@ class KeycloakDirectory:
         self._http = httpx.AsyncClient(timeout=10)
         self._token = ""
         self._expires_at = 0.0
-        self._cache: dict[str, tuple[float, User | None]] = {}
+        self._token_lock = asyncio.Lock()
+        self._cache: dict[tuple[str, str], tuple[float, Any]] = {}
 
     async def close(self) -> None:
         await self._http.aclose()
 
     async def _access_token(self) -> str:
+        async with self._token_lock:
+            return await self._refresh_token()
+
+    async def _refresh_token(self) -> str:
         if self._token and time.monotonic() < self._expires_at:
             return self._token
         response = await self._http.post(
@@ -51,39 +64,119 @@ class KeycloakDirectory:
         self._expires_at = time.monotonic() + ttl - min(30, ttl / 2)
         return self._token
 
-    async def user(self, subject: str) -> User | None:
-        cached = self._cache.get(subject)
-        if cached and time.monotonic() < cached[0]:
-            return cached[1]
-        url = self._config.admin_url.rstrip("/") + "/users/" + quote(subject, safe="")
+    async def _get(self, path: str, params: dict[str, Any] | None = None) -> Any:
+        url = self._config.admin_url.rstrip("/") + path
         for attempt in range(2):
             token = await self._access_token()
             response = await self._http.get(
-                url, headers={"Authorization": "Bearer " + token}
+                url, params=params, headers={"Authorization": "Bearer " + token}
             )
             if response.status_code != 401 or attempt:
                 break
             self._token = ""
-        if response.status_code == 404:
+        response.raise_for_status()
+        return response.json()
+
+    def _store(self, key: tuple[str, str], value: Any) -> None:
+        now = time.monotonic()
+        if len(self._cache) >= 2048:
+            self._cache = {k: v for k, v in self._cache.items() if now < v[0]}
+            if len(self._cache) >= 2048:
+                self._cache.clear()
+        self._cache[key] = (now + (30 if value is None else 300), value)
+
+    def _parse_user(self, subject: str, data: dict[str, Any]) -> User | None:
+        if not data.get("enabled", True):
+            return None
+        name = " ".join(
+            part.strip()
+            for part in [data.get("firstName"), data.get("lastName")]
+            if part and part.strip()
+        )
+        qq = (data.get("attributes") or {}).get(self._config.qq_attribute, [])
+        # Keycloak attributes are arrays; ambiguous bindings are not used.
+        qq = str(qq[0]).strip() if isinstance(qq, list) and len(qq) == 1 else ""
+        return User(
+            subject,
+            name or data.get("username") or subject,
+            qq if re.fullmatch(r"[1-9][0-9]{4,19}", qq) else None,
+        )
+
+    async def lookup_user(
+        self, *, qq: str | None = None, subject: str | None = None
+    ) -> User | None:
+        """Look up an enabled member by exactly one identifier, without roles."""
+        if (qq is None) == (subject is None):
+            raise ValueError("provide exactly one of qq or subject")
+        if subject is not None:
+            if not isinstance(subject, str) or not subject.strip():
+                raise ValueError("subject must be a non-empty string")
+            return await self._user_by_subject(subject.strip())
+        if not isinstance(qq, str) or not re.fullmatch(r"[1-9][0-9]{4,19}", qq.strip()):
+            raise ValueError(
+                "QQ must be a string of 5–20 ASCII digits without leading zero"
+            )
+        return await self._user_by_qq(qq.strip())
+
+    async def _user_by_subject(self, subject: str) -> User | None:
+        key = ("subject", subject)
+        cached = self._cache.get(key)
+        if cached and time.monotonic() < cached[0]:
+            return cached[1]
+        try:
+            data = await self._get("/users/" + quote(subject, safe=""))
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code != 404:
+                raise
             user = None
         else:
-            response.raise_for_status()
-            data = response.json()
-            if not data.get("enabled", True):
-                user = None
-            else:
-                name = " ".join(
-                    part
-                    for part in [data.get("firstName"), data.get("lastName")]
-                    if part
-                )
-                qq = (data.get("attributes") or {}).get(self._config.qq_attribute, [])
-                # Keycloak attributes are arrays; ambiguous bindings are not used.
-                qq = str(qq[0]).strip() if isinstance(qq, list) and len(qq) == 1 else ""
-                user = User(
-                    subject,
-                    name or data.get("username") or subject,
-                    qq if qq.isascii() and qq.isdecimal() else None,
-                )
-        self._cache[subject] = (time.monotonic() + (300 if user else 30), user)
+            user = self._parse_user(subject, data)
+        self._store(key, user)
         return user
+
+    async def _user_by_qq(self, qq: str) -> User | None:
+        key = ("qq", qq)
+        cached = self._cache.get(key)
+        if cached and time.monotonic() < cached[0]:
+            return cached[1]
+        matches: dict[str, User] = {}
+        first = 0
+        while True:
+            data = await self._get(
+                "/users",
+                {
+                    "q": f"{self._config.qq_attribute}:{qq}",
+                    "enabled": "true",
+                    "briefRepresentation": "false",
+                    "first": first,
+                    "max": 100,
+                },
+            )
+            for item in data:
+                user = self._parse_user(item["id"], item)
+                if user is not None and user.qq == qq:
+                    matches[user.subject] = user
+                    if len(matches) > 1:
+                        raise AmbiguousQQBinding(
+                            "QQ is bound to multiple enabled members"
+                        )
+            if len(data) < 100:
+                break
+            first += len(data)
+        user = next(iter(matches.values()), None)
+        self._store(key, user)
+        if user is not None:
+            self._store(("subject", user.subject), user)
+        return user
+
+    async def realm_roles(self, subject: str) -> list[str]:
+        key = ("roles", subject)
+        cached = self._cache.get(key)
+        if cached and time.monotonic() < cached[0]:
+            return list(cached[1])
+        data = await self._get(
+            "/users/" + quote(subject, safe="") + "/role-mappings/realm/composite"
+        )
+        roles = sorted({role["name"] for role in data if role.get("name")})
+        self._store(key, roles)
+        return list(roles)

@@ -9,13 +9,17 @@ from datetime import datetime
 from typing import Any
 from zoneinfo import ZoneInfo
 
+import httpx
+from bitnp_authz import positions_from_roles
+
 from .config import AppConfig
 from .contacts import ContactDirectory
+from .keycloak import AmbiguousQQBinding, KeycloakDirectory
 from .knowledge import KnowledgeBase
 from .mcp_runtime import McpManager
 from .messages import MessageStore
 from .model_boundary import ModelIds
-from .napcat import NapCatClient, OutboundQueue
+from .napcat import NapCatClient, OutboundQueue, parse_message_content
 from .scheduler import ScheduleStore
 
 LOGGER = logging.getLogger(__name__)
@@ -120,6 +124,7 @@ class HistoryService:
                     "content": item.get("content", ""),
                     "message_id": item.get("message_id", ""),
                     "mentioned_bot": bool(item.get("mentioned_bot", False)),
+                    "mentions": item.get("mentions", []),
                 }
             )
         return output
@@ -141,6 +146,9 @@ class HistoryService:
             if not raw_sender:
                 continue
             sender = item.get("sender") or {}
+            content, mentions, mentioned_bot = parse_message_content(
+                item.get("message"), self._napcat.self_id
+            )
             output.append(
                 {
                     "chat_type": chat_type,
@@ -149,14 +157,13 @@ class HistoryService:
                     "sender_name": str(
                         sender.get("card") or sender.get("nickname") or ""
                     ),
-                    "content": _extract_text(item.get("message"))[
-                        : self._config.history_content_chars
-                    ],
+                    "content": content[: self._config.history_content_chars],
+                    "mentions": mentions,
                     "timestamp": float(item.get("time", 0)),
                     "message_id": str(
                         item.get("message_id") or item.get("message_seq") or ""
                     ),
-                    "mentioned_bot": False,
+                    "mentioned_bot": mentioned_bot,
                 }
             )
         return output
@@ -294,6 +301,7 @@ def build_tool_registry(
     history: HistoryService,
     chat_directory: ChatDirectoryService,
     mcp: McpManager,
+    identities: KeycloakDirectory | None = None,
 ) -> ToolRegistry:
     registry = ToolRegistry()
 
@@ -524,6 +532,91 @@ def build_tool_registry(
             )
         )
 
+    async def get_member_identity(args: dict[str, Any]) -> dict[str, Any]:
+        identifiers = [key for key in ("contact_id", "qq", "subject") if key in args]
+        if len(identifiers) != 1:
+            raise ValueError("provide exactly one of contact_id, qq or subject")
+        identifier = identifiers[0]
+        value = args[identifier]
+        if identifier == "subject":
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError("subject must be a non-empty string")
+        elif not isinstance(value, str) or not re.fullmatch(
+            r"[1-9][0-9]{4,19}", value.strip()
+        ):
+            raise ValueError(
+                "QQ must be a string of 5–20 ASCII digits without leading zero"
+            )
+        if identities is None:
+            return {"status": "disabled", "source": "keycloak"}
+        try:
+            user = await identities.lookup_user(
+                **{"subject" if identifier == "subject" else "qq": value.strip()}
+            )
+            if user is None:
+                return {"status": "not_found", "source": "keycloak"}
+            roles = await identities.realm_roles(user.subject)
+        except AmbiguousQQBinding:
+            return {"status": "ambiguous", "source": "keycloak"}
+        except httpx.HTTPError:
+            LOGGER.warning("member identity lookup unavailable")
+            return {"status": "unavailable", "source": "keycloak"}
+        return {
+            "status": "found",
+            "source": "keycloak",
+            "contact_id": user.qq,
+            "subject": user.subject,
+            "name": user.name,
+            "realm_roles": roles,
+            "positions": [
+                {
+                    "code": position.code,
+                    "label": position.label,
+                    "scope": position.scope.value,
+                    "department": position.department.role_key
+                    if position.department is not None
+                    else None,
+                }
+                for position in positions_from_roles(roles)
+            ],
+        }
+
+    identity_schema = _object_schema(
+        {
+            "contact_id": {
+                "type": "string",
+                "description": "已有用户引用，如 sender_id 或 mentions 中的 contact_id",
+            },
+            "qq": {
+                "type": "string",
+                "pattern": "^[1-9][0-9]{4,19}$",
+                "description": "仅用于用户已明确提供的 QQ 号",
+            },
+            "subject": {
+                "type": "string",
+                "minLength": 1,
+                "description": "已知的 Keycloak subject（OIDC sub），可来自身份或 guild 查询结果",
+            },
+        }
+    )
+    identity_schema["oneOf"] = [
+        {"required": [key]} for key in ("contact_id", "qq", "subject")
+    ]
+    registry.register(
+        Tool(
+            "get_member_identity",
+            "只读查询 Keycloak 成员姓名、subject（sub）、有效领域角色和职务。"
+            "contact_id、qq、subject 三选一；从 QQ 查询时优先使用发送者或 @成员的用户引用，"
+            "已知 subject 时可直接查询，无需 QQ 绑定。"
+            "返回 found、not_found（无匹配的启用成员）、ambiguous（QQ 绑定冲突）、"
+            "unavailable 或 disabled 状态。本地称呼和备注不是身份依据；"
+            "领域角色不授予 Bot 管理员权限。",
+            identity_schema,
+            get_member_identity,
+            contact_refs=True,
+        )
+    )
+
     async def get_contact_profile(args: dict[str, Any]) -> dict[str, Any]:
         return contacts.get(_required_str(args, "contact_id"))
 
@@ -558,7 +651,7 @@ def build_tool_registry(
         (
             "list_contact_profiles",
             (
-                "分页列出机器人保存的全部联系人资料。资料独立于 QQ 好友列表，"
+                "分页列出机器人保存的本地称呼、昵称和备注，不查询 Keycloak 身份。资料独立于 QQ 好友列表，"
                 "包含群聊中见过或人工预置的非好友同事。"
             ),
             _object_schema(
@@ -575,7 +668,7 @@ def build_tool_registry(
         ),
         (
             "search_contact_profiles",
-            "按显示名称或备注搜索联系人资料，并支持分页。",
+            "按本地自定义称呼、QQ 昵称或备注搜索联系人，并支持分页；不搜索 Keycloak。",
             _object_schema(
                 {
                     "query": {"type": "string"},
@@ -592,21 +685,24 @@ def build_tool_registry(
         ),
         (
             "get_contact_profile",
-            "读取一个联系人的资料；该账号不要求是机器人 QQ 好友。",
+            "读取本地自定义称呼（display_name）、QQ 昵称和备注；姓名和职务请用 get_member_identity。该账号不要求是机器人 QQ 好友。",
             _object_schema({"contact_id": {"type": "string"}}, ["contact_id"]),
             get_contact_profile,
         ),
         (
             "update_contact_profile",
             (
-                "新建或更新联系人的昵称和备注，用于逐渐认识群聊中的同事。"
+                "新建或更新本地自定义称呼（display_name）和备注；QQ 昵称由消息观察所得。"
                 "该账号不要求是机器人 QQ 好友。"
-                "此工具不能修改 admin 权限。"
+                "此工具不能修改 Keycloak 姓名、职务、QQ 绑定或 Bot admin 权限。"
             ),
             _object_schema(
                 {
                     "contact_id": {"type": "string"},
-                    "display_name": {"type": "string"},
+                    "display_name": {
+                        "type": "string",
+                        "description": "本地自定义称呼，不是 Keycloak 姓名",
+                    },
                     "notes": {"type": "string"},
                 },
                 ["contact_id"],
@@ -745,18 +841,6 @@ def build_tool_registry(
             )
         )
     return registry
-
-
-def _extract_text(message: Any) -> str:
-    if isinstance(message, str):
-        return re.sub(r"\[CQ:[^\]]+\]", "", message)
-    if not isinstance(message, list):
-        return ""
-    return "".join(
-        str((segment.get("data") or {}).get("text", ""))
-        for segment in message
-        if isinstance(segment, dict) and segment.get("type") == "text"
-    )
 
 
 def _object_schema(

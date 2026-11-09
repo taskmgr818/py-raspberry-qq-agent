@@ -309,7 +309,9 @@ class AppConfig:
             napcat_request_timeout_seconds=float(
                 napcat.get("request_timeout_seconds", 30)
             ),
-            keycloak=KeycloakConfig(**keycloak),
+            keycloak=KeycloakConfig(
+                **{**keycloak, "enabled": _as_bool(keycloak.get("enabled", False))}
+            ),
             guild=GuildConfig(
                 enabled=_as_bool(guild.get("enabled", False)),
                 database_url=str(guild.get("database_url", "")),
@@ -439,6 +441,7 @@ class AppConfig:
                 raise ConfigError(
                     "guild poll_seconds and advance_hours must be positive"
                 )
+        if self.keycloak.enabled or self.guild.enabled:
             if not all(
                 (
                     self.keycloak.issuer,
@@ -448,7 +451,14 @@ class AppConfig:
                 )
             ):
                 raise ConfigError(
-                    "keycloak issuer, admin_url, client_id and client_secret are required for guild"
+                    "keycloak issuer, admin_url, client_id and client_secret are required "
+                    "when keycloak or guild is enabled"
+                )
+            if not re.fullmatch(
+                r"[A-Za-z_][A-Za-z0-9_.-]*", self.keycloak.qq_attribute
+            ):
+                raise ConfigError(
+                    "keycloak.qq_attribute must be a valid attribute name"
                 )
         if self.guild.weekly.schedule:
             from datetime import datetime
@@ -532,9 +542,17 @@ def _default_system_prompt() -> str:
 6. 不使用颜文字，不使用 emoji。
 7. 你在内部完成思考，外部动作只通过工具完成。普通文本输出不会发送给 QQ 用户；需要
    回复时必须调用 send_qq_message，并原样使用消息上下文里的 target_id。
-8. 你只能看到QQ 用户或群的不透明引用。绝不猜测、构造或索取 QQ 号，也不要尝试还原
-   真实身份。
-9. 你可以读取和修改联系人资料，但不能授予或收回 admin 权限。权限信息只读。
+8. QQ 用户和群通常使用不透明引用。绝不猜测、构造或索取 QQ 号；成员身份只能通过
+   get_member_identity 查询管理员维护的 Keycloak 成员身份。若用户已明确提供 QQ 号，
+   可使用该工具的 qq 参数；其他 QQ 工具仍使用已有引用。消息中的 mentions 按原顺序
+   保存被 @ 的用户，可将其中 contact_id 传给 get_member_identity。
+   已知 Keycloak subject（OIDC sub）时，可用该工具的 subject 参数直接查成员，无需 QQ 绑定；
+   contact_id、qq、subject 三选一，不得根据姓名或备注猜测 subject。
+9. 本地联系人资料只记录自定义称呼（display_name）、观察到的昵称（nickname）和备注。
+    姓名、subject（sub）、领域角色和职务以 get_member_identity 返回的 Keycloak 数据为准；
+    不得依据昵称或备注猜测绑定，未绑定不代表不能正常聊天。介绍成员或任务负责人时使用
+    Keycloak 姓名，日常称呼可用本地自定义称呼，缺失时回退到 QQ 昵称。
+    你可以修改本地称呼和备注，但不能修改 Keycloak 身份或授予、收回 Bot admin 权限。
     联系人资料独立于 QQ 好友列表；即使对方不是好友，只要知道其联系人引用，也可以
     用 get_contact_profile 或 update_contact_profile 查看和记录。需要辨认同事时可使用
     list_contact_profiles 或 search_contact_profiles 按页查找。

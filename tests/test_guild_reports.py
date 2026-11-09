@@ -29,7 +29,8 @@ def test_previous_full_week_uses_monday_boundary_in_utc_plus_eight() -> None:
 
 
 @pytest.mark.asyncio
-async def test_weekly_markdown_has_fixed_counts_names_and_no_qq_target(config) -> None:
+@pytest.mark.parametrize("qq", ["123456789", None])
+async def test_weekly_markdown_has_fixed_counts_names_and_no_qq_target(config, qq) -> None:
     at = datetime(2026, 10, 26, 10, tzinfo=REPORT_TIMEZONE)
     start, end = previous_week(at)
     repository = AsyncMock()
@@ -69,7 +70,7 @@ async def test_weekly_markdown_has_fixed_counts_names_and_no_qq_target(config) -
         ],
     ]
     directory = AsyncMock()
-    directory.user.return_value = User("alice", "Alice", "123456789")
+    directory.lookup_user.return_value = User("alice", "Alice", qq)
     llm = AsyncMock()
     llm.complete.return_value = AssistantReply("## 进展\n已整理。", [], {})
     mcp = AsyncMock()
@@ -91,5 +92,7 @@ async def test_weekly_markdown_has_fixed_counts_names_and_no_qq_target(config) -
     prompt = str(llm.complete.call_args)
     assert "Alice" in prompt and "123456789" not in prompt
     assert "target_id" not in prompt
+    directory.lookup_user.assert_awaited_once_with(subject="alice")
+    directory.realm_roles.assert_not_awaited()
     assert repository.query.call_args.args[1] == (start, end)
     mcp.call.assert_not_awaited()

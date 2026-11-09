@@ -8,7 +8,7 @@ import re
 import time
 import uuid
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 from websockets.asyncio.client import ClientConnection, connect
@@ -34,6 +34,7 @@ class IncomingMessage:
     message_id: str
     timestamp: float
     mentioned_bot: bool
+    mentions: list[dict[str, str]] = field(default_factory=list)
 
 
 class NapCatClient:
@@ -79,6 +80,10 @@ class NapCatClient:
 
     def connected(self) -> bool:
         return self._ws is not None and not self._ws.close_code
+
+    @property
+    def self_id(self) -> str:
+        return self._self_id
 
     async def _run(self) -> None:
         while not self._stop.is_set():
@@ -180,30 +185,13 @@ class NapCatClient:
         if message_type not in {"private", "group"}:
             return None
 
-        text_parts: list[str] = []
-        mentioned = False
-        message = payload.get("message")
-        if isinstance(message, str):
-            if self_id and re.search(rf"\[CQ:at,qq={re.escape(self_id)}\]", message):
-                mentioned = True
-            text_parts.append(_strip_cq_codes(message))
-        elif isinstance(message, list):
-            for segment in message:
-                if not isinstance(segment, dict):
-                    continue
-                segment_type = str(segment.get("type", ""))
-                data = segment.get("data") or {}
-                if segment_type == "text":
-                    text_parts.append(str(data.get("text", "")))
-                elif (
-                    segment_type == "at"
-                    and self_id
-                    and str(data.get("qq", "")) == self_id
-                ):
-                    mentioned = True
-        if not text_parts and isinstance(payload.get("raw_message"), str):
-            text_parts.append(_strip_cq_codes(payload["raw_message"]))
-        content = "".join(text_parts).strip()
+        content, mentions, mentioned = parse_message_content(
+            payload.get("message"), self_id
+        )
+        if not content and isinstance(payload.get("raw_message"), str):
+            content, mentions, mentioned = parse_message_content(
+                payload["raw_message"], self_id
+            )
         if not content:
             return None
 
@@ -223,6 +211,7 @@ class NapCatClient:
             message_id=str(payload.get("message_id", "")),
             timestamp=timestamp,
             mentioned_bot=mentioned,
+            mentions=mentions,
         )
 
     async def call_action(
@@ -559,9 +548,47 @@ class OutboundQueue:
                 self._queue.task_done()
 
 
-def _strip_cq_codes(value: str) -> str:
-    """Remove OneBot CQ payloads so raw targets cannot leak into message text."""
-    return re.sub(r"\[CQ:[^\]]+\]", "", value)
+def parse_message_content(
+    message: Any, self_id: str = ""
+) -> tuple[str, list[dict[str, str]], bool]:
+    """Keep text and ordered mention markers; QQ targets stay in structured fields."""
+    mentions: list[dict[str, str]] = []
+    mentioned_bot = False
+
+    def mention(qq: str) -> str:
+        nonlocal mentioned_bot
+        if self_id and qq == self_id:
+            mentioned_bot = True
+            return ""
+        if qq == "all":
+            return "@全体成员"
+        if not re.fullmatch(r"[1-9][0-9]*", qq):
+            return ""
+        marker = f"@{len(mentions) + 1}"
+        mentions.append({"contact_id": qq, "marker": marker})
+        return marker
+
+    if isinstance(message, str):
+
+        def replace(match: re.Match[str]) -> str:
+            target = re.fullmatch(r"\[CQ:at,qq=([^,\]]+)(?:,[^\]]*)?\]", match[0])
+            return mention(target[1]) if target else ""
+
+        text = re.sub(r"\[CQ:[^\]]+\]", replace, message)
+    elif isinstance(message, list):
+        parts = []
+        for segment in message:
+            if not isinstance(segment, dict):
+                continue
+            data = segment.get("data") or {}
+            if segment.get("type") == "text":
+                parts.append(str(data.get("text", "")))
+            elif segment.get("type") == "at":
+                parts.append(mention(str(data.get("qq", ""))))
+        text = "".join(parts)
+    else:
+        text = ""
+    return text.strip(), mentions, mentioned_bot
 
 
 def _response_message_id(response: dict[str, Any]) -> str:

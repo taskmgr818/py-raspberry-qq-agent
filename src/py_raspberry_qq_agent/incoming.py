@@ -31,9 +31,7 @@ class IncomingService:
 
     async def handle(self, message: IncomingMessage) -> None:
         chat_id = message.raw_chat_id
-        seen_key = (
-            f"{message.chat_type}:{chat_id}:{message.message_id}"
-        )
+        seen_key = f"{message.chat_type}:{chat_id}:{message.message_id}"
         if message.message_id and seen_key in self._seen_set:
             return
         if message.message_id:
@@ -53,6 +51,7 @@ class IncomingService:
             timestamp=message.timestamp,
             message_id=message.message_id,
             mentioned_bot=message.mentioned_bot,
+            mentions=message.mentions,
         )
 
         decision = await self._gate.decide(
@@ -80,8 +79,7 @@ class IncomingService:
             ),
             source="incoming_message",
             context=(
-                f"消息：{message.content[:8000]}\n"
-                f"重要性依据：{decision.reason}\n"
+                f"消息：{message.content[:8000]}\n重要性依据：{decision.reason}\n"
             ),
             chat_type=message.chat_type,
             target_id=chat_id,
@@ -92,6 +90,7 @@ class IncomingService:
                 "importance_method": decision.method,
                 "importance_reason": decision.reason,
                 "confidence": decision.confidence,
+                "mentions": message.mentions,
             },
         )
         LOGGER.info(
