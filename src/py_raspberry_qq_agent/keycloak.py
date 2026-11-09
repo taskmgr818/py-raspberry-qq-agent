@@ -102,7 +102,23 @@ class KeycloakDirectory:
             qq if re.fullmatch(r"[1-9][0-9]{4,19}", qq) else None,
         )
 
-    async def user(self, subject: str) -> User | None:
+    async def lookup_user(
+        self, *, qq: str | None = None, subject: str | None = None
+    ) -> User | None:
+        """Look up an enabled member by exactly one identifier, without roles."""
+        if (qq is None) == (subject is None):
+            raise ValueError("provide exactly one of qq or subject")
+        if subject is not None:
+            if not isinstance(subject, str) or not subject.strip():
+                raise ValueError("subject must be a non-empty string")
+            return await self._user_by_subject(subject.strip())
+        if not isinstance(qq, str) or not re.fullmatch(r"[1-9][0-9]{4,19}", qq.strip()):
+            raise ValueError(
+                "QQ must be a string of 5–20 ASCII digits without leading zero"
+            )
+        return await self._user_by_qq(qq.strip())
+
+    async def _user_by_subject(self, subject: str) -> User | None:
         key = ("subject", subject)
         cached = self._cache.get(key)
         if cached and time.monotonic() < cached[0]:
@@ -118,12 +134,7 @@ class KeycloakDirectory:
         self._store(key, user)
         return user
 
-    async def user_by_qq(self, qq: str) -> User | None:
-        qq = qq.strip()
-        if not re.fullmatch(r"[1-9][0-9]{4,19}", qq):
-            raise ValueError(
-                "QQ must be a string of 5–20 ASCII digits without leading zero"
-            )
+    async def _user_by_qq(self, qq: str) -> User | None:
         key = ("qq", qq)
         cached = self._cache.get(key)
         if cached and time.monotonic() < cached[0]:

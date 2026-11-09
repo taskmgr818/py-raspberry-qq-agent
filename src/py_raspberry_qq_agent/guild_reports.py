@@ -95,7 +95,7 @@ class WeeklyReports:
             {m["subject"] for m in members} | {c["author_subject"] for c in comments}
         ):
             try:
-                user = await self._directory.user(subject)
+                user = await self._directory.lookup_user(subject=subject)
                 names[subject] = user.name if user else subject
             except Exception:  # noqa: BLE001 - display lookup must not block the report
                 LOGGER.warning("weekly report identity unavailable subject=%s", subject)

@@ -86,7 +86,7 @@ async def test_assignment_windows_include_only_current_role_changes(database) ->
         (node_id, subject, end),
     )
     directory = AsyncMock()
-    directory.user.return_value = User(subject, "Test", "12345")
+    directory.lookup_user.return_value = User(subject, "Test", "12345")
     outbound = Mock()
     service = AssignmentNotifications(GuildConfig(), repository, directory, outbound)
     await service.check(start, end)

@@ -16,7 +16,7 @@ async def test_assignment_notifications_are_independent_of_due_reminders() -> No
         {"id": 2, "title": "Second task", "subject": "bob", "role": "member"},
     ]
     directory = AsyncMock()
-    directory.user.side_effect = [
+    directory.lookup_user.side_effect = [
         User("alice", "Alice", "12345"),
         User("bob", "Bob", "54321"),
     ]

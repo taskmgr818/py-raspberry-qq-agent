@@ -533,17 +533,26 @@ def build_tool_registry(
         )
 
     async def get_member_identity(args: dict[str, Any]) -> dict[str, Any]:
-        if ("contact_id" in args) == ("qq" in args):
-            raise ValueError("provide exactly one of contact_id or qq")
-        qq = args.get("contact_id", args.get("qq"))
-        if not isinstance(qq, str) or not re.fullmatch(r"[1-9][0-9]{4,19}", qq.strip()):
+        identifiers = [key for key in ("contact_id", "qq", "subject") if key in args]
+        if len(identifiers) != 1:
+            raise ValueError("provide exactly one of contact_id, qq or subject")
+        identifier = identifiers[0]
+        value = args[identifier]
+        if identifier == "subject":
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError("subject must be a non-empty string")
+        elif not isinstance(value, str) or not re.fullmatch(
+            r"[1-9][0-9]{4,19}", value.strip()
+        ):
             raise ValueError(
                 "QQ must be a string of 5–20 ASCII digits without leading zero"
             )
         if identities is None:
             return {"status": "disabled", "source": "keycloak"}
         try:
-            user = await identities.user_by_qq(qq)
+            user = await identities.lookup_user(
+                **{"subject" if identifier == "subject" else "qq": value.strip()}
+            )
             if user is None:
                 return {"status": "not_found", "source": "keycloak"}
             roles = await identities.realm_roles(user.subject)
@@ -583,15 +592,23 @@ def build_tool_registry(
                 "pattern": "^[1-9][0-9]{4,19}$",
                 "description": "仅用于用户已明确提供的 QQ 号",
             },
+            "subject": {
+                "type": "string",
+                "minLength": 1,
+                "description": "已知的 Keycloak subject（OIDC sub），可来自身份或 guild 查询结果",
+            },
         }
     )
-    identity_schema["oneOf"] = [{"required": ["contact_id"]}, {"required": ["qq"]}]
+    identity_schema["oneOf"] = [
+        {"required": [key]} for key in ("contact_id", "qq", "subject")
+    ]
     registry.register(
         Tool(
             "get_member_identity",
             "只读查询 Keycloak 成员姓名、subject（sub）、有效领域角色和职务。"
-            "contact_id 与 qq 二选一；优先使用发送者或 @成员的用户引用。"
-            "返回 found、not_found（无有效绑定）、ambiguous（绑定冲突）、"
+            "contact_id、qq、subject 三选一；从 QQ 查询时优先使用发送者或 @成员的用户引用，"
+            "已知 subject 时可直接查询，无需 QQ 绑定。"
+            "返回 found、not_found（无匹配的启用成员）、ambiguous（QQ 绑定冲突）、"
             "unavailable 或 disabled 状态。本地称呼和备注不是身份依据；"
             "领域角色不授予 Bot 管理员权限。",
             identity_schema,

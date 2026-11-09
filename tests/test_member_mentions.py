@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock, Mock, call
 
 import pytest
 
@@ -72,7 +72,7 @@ async def test_mention_survives_incoming_history_and_agent_member_lookup(config)
     task = await tasks.get()
     assert task.metadata["mentions"] == [{"contact_id": "12345", "marker": "@1"}]
     directory = AsyncMock()
-    directory.user_by_qq.return_value = User("alice-sub", "Alice", "12345")
+    directory.lookup_user.return_value = User("alice-sub", "Alice", "12345")
     directory.realm_roles.return_value = ["position-clinic-member"]
     napcat.fetch_history = AsyncMock(return_value=[payload])
     history = HistoryService(config, store, napcat)
@@ -115,11 +115,30 @@ async def test_mention_survives_incoming_history_and_agent_member_lookup(config)
             assert result["ok"]
             assert result["result"]["subject"] == "alice-sub"
             assert result["result"]["contact_id"] == self.mention_ref
+            if self.calls == 2:
+                return AssistantReply(
+                    "",
+                    [
+                        {
+                            "function": {
+                                "name": "get_member_identity",
+                                "arguments": json.dumps(
+                                    {"subject": result["result"]["subject"]}
+                                ),
+                            }
+                        }
+                    ],
+                    {},
+                )
             return AssistantReply("", [], {})
 
     llm = Llm()
     await AgentRunner(config, llm, registry).run_task(task)
-    directory.user_by_qq.assert_awaited_once_with("12345")
+    assert llm.calls == 3
+    assert directory.lookup_user.await_args_list == [
+        call(qq="12345"),
+        call(subject="alice-sub"),
+    ]
     group_ref = registry.ids.encode({"chat_type": "group", "target_id": "88888"})[
         "target_id"
     ]

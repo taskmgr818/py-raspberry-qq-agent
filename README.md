@@ -102,7 +102,8 @@ Keycloak 是成员身份的权威来源，维护姓名、`subject`（OIDC sub）
 
 `get_contact_profile`、`update_contact_profile`、联系人列表及搜索只操作本地资料。
 独立的 `get_member_identity` 接受已有用户引用 `contact_id`，或用户已经明确提供的字符串 `qq`，
-二选一；返回 Keycloak 姓名、`subject`、有效 `realm_roles` 和 `positions`。模型通常使用
+或已知的 `subject`（OIDC sub），三选一；返回 Keycloak 姓名、`subject`、有效 `realm_roles`
+和 `positions`。按 `subject` 查询不要求成员绑定 QQ，未绑定时返回 `contact_id: null`。模型通常使用
 发送者引用或消息 `mentions` 中的 `contact_id`，程序在内部还原 QQ；工具结果继续返回用户引用。
 介绍成员和展示任务负责人时使用 Keycloak 姓名，日常称呼可用本地称呼，缺失时回退到 QQ 昵称。
 不能用昵称、姓名或备注猜测 QQ 绑定。
@@ -284,9 +285,14 @@ keycloak:
 启用时必须提供完整服务账号配置。后台 guild 通知和 agent 工具共用目录、HTTP 连接和缓存。
 管理员账户只用于下述配置脚本，不传给运行中的 Bot。
 
+agent 和后台任务统一调用 `KeycloakDirectory.lookup_user(qq=...)` 或
+`lookup_user(subject=...)`，两个参数必须且只能提供一个；基础查询不读取角色。
+agent 工具在基础资料上补充角色和职务，后台通知仅在用户有有效 QQ 绑定时发送，周报查询姓名不要求 QQ 绑定。
+
 `get_member_identity` 的 `status` 为 `found`、`not_found`、`ambiguous`、`unavailable` 或
-`disabled`。仅使用启用用户的单值、格式有效、精确匹配的 QQ 绑定；多个启用用户绑定同一 QQ
-会返回 `ambiguous`，不能选第一条。`not_found` 表示无有效绑定，不等于 Keycloak 服务故障。
+`disabled`。按 QQ 查询仅使用启用用户的单值、格式有效、精确匹配的 QQ 绑定；多个启用用户绑定同一 QQ
+会返回 `ambiguous`，不能选第一条。`not_found` 表示按 QQ 无有效绑定，或按 `subject` 用户不存在或已禁用，
+不等于 Keycloak 服务故障。
 成功和无匹配结果分别缓存 5 分钟和 30 秒；服务故障不缓存为“未找到”。
 
 有效领域角色通过 Keycloak `/users/{id}/role-mappings/realm/composite` 读取。
