@@ -642,7 +642,12 @@ def build_tool_registry(
                     "查询任务和待办，默认当前发送者直接参与的未完成节点。scope=mine/user/all；"
                     "user 必须提供已知 subject，all 查询系统待办。relation=leader/member/any；"
                     "include_inherited=true 包含向下负责、向上参与的继承关系。"
-                    "overdue=true 仅查逾期；parent_id=null 仅查根节点。按截止时间排序，支持分页。"
+                    "返回精简摘要：path 为根到自身的 ID/标题路径，child_count 为直接子节点数，"
+                    "leaders 为直接负责人，member_count 为普通成员数；完整描述和成员请查详情。"
+                    "选创建位置时用 scope=all,status=all,parent_id=null 从根查看，"
+                    "独立活动通常在根层；确有从属关系时再按 parent_id 查看相关子节点，或用 query 搜索并核对详情。"
+                    "不要用默认的个人待办代表全站结构；has_more=true 表示还有下一页。"
+                    "overdue=true 仅查逾期；默认 sort=due 按截止时间排序，sort=position 按看板同级顺序。"
                 ),
                 _object_schema(
                     {
@@ -661,13 +666,14 @@ def build_tool_registry(
                         "overdue": {"type": "boolean"},
                         "parent_id": parent_schema,
                         "query": {"type": "string", "description": "标题包含的文字"},
+                        "sort": {"type": "string", "enum": ["due", "position"]},
                     }
                 ),
                 guild_service.list_nodes,
             ),
             (
                 "get_guild_node",
-                "查询 guild 节点详情、创建者和直接负责人/成员。node_id 必须来自已知节点或查询结果。",
+                "查询 guild 节点完整描述、path、child_count、创建者和全部直接负责人/成员。选择父节点时核对其职责和路径。node_id 必须来自已知节点或查询结果。",
                 _object_schema({"node_id": node_id_schema}, ["node_id"]),
                 guild_service.get_node,
             ),
@@ -689,15 +695,27 @@ def build_tool_registry(
             (
                 "create_guild_node",
                 (
-                    "执行当前发送者的 /guild 创建 或 /guild create 命令。"
+                    "根据当前发送者的自然语言创建请求及相关上下文创建节点。"
                     "创建者由程序绑定当前发送者，不能指定或代替别人。"
-                    "parent_id 不填或为 null 时创建根节点；未指定负责人时由创建者负责。"
+                    "parent_id 必填：根节点传 null，子节点传已核实的父节点 ID。"
+                    "优先遵循用户明确归属；未指定时，独立活动、独立项目和并列事项通常建在根层，"
+                    "无需用户特意要求根节点；只有明确属于现有事项的组成部分、阶段或子任务才建子节点。"
+                    "主题相关、名称相近、负责人相同不足以建立父子关系，不能为了归类而嵌套。"
+                    "未指定负责人时由创建者负责。"
                     "负责人和成员使用已验证的 Keycloak subject，不能重叠；不会自动继承父节点直接成员。"
-                    "同一消息只创建一个节点，重复调用返回原结果；参数不足或父节点不明确时先询问用户。"
+                    "考虑子节点时先查询并核实父节点职责、路径和实际从属关系；"
+                    "任务信息不足或位置有实质歧义时先追问，清楚的独立活动无需追问父节点。"
+                    "默认先向用户确认标题、完整位置及已指定的任务信息；"
+                    "只有当前发送者自己在当前消息或前文已明确、完整地描述任务和归属，"
+                    "或已确认具体方案时才可直接创建。模型自己的总结不等于用户授权。"
+                    "同一消息只创建一个节点，重复调用返回原结果；定时任务不能创建。"
                 ),
                 _object_schema(
                     {
-                        "parent_id": parent_schema,
+                        "parent_id": {
+                            **parent_schema,
+                            "description": "根节点为 null（独立活动/项目通常使用）；明确属于现有事项的子节点使用已核实父节点 ID，不能省略",
+                        },
                         "title": {"type": "string", "minLength": 1, "maxLength": 200},
                         "description": {"type": "string", "maxLength": 20000},
                         "due_at": {
@@ -712,7 +730,7 @@ def build_tool_registry(
                         "leader_subjects": subject_list,
                         "member_subjects": subject_list,
                     },
-                    ["title"],
+                    ["title", "parent_id"],
                 ),
                 guild_service.create_node,
             ),

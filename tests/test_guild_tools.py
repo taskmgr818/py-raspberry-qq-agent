@@ -10,20 +10,20 @@ import httpx
 import pytest
 
 from py_raspberry_qq_agent.agent import AgentRunner
-from py_raspberry_qq_agent.guild import GuildConfig, GuildService, guild_command
+from py_raspberry_qq_agent.guild import GuildConfig, GuildService
 from py_raspberry_qq_agent.keycloak import AmbiguousQQBinding, User
 from py_raspberry_qq_agent.llm import AssistantReply
 from py_raspberry_qq_agent.tasks import AgentTask
 
 
-def command(sender="12345", action="create", source="incoming_message"):
+def message_task(sender="12345", source="incoming_message"):
     return AgentTask(
         "处理当前消息",
         source=source,
         sender_id=sender,
         chat_type="group",
         target_id="99999",
-        metadata={"guild_command": action, "message_id": sender},
+        metadata={"message_id": sender},
     )
 
 
@@ -57,37 +57,45 @@ def service_for(repository=None):
     )
 
 
-@pytest.mark.parametrize(
-    ("text", "action"),
-    [
-        ("/guild 创建 任务", "create"),
-        (" /guild create Task ", "create"),
-        ("/guild 待办", "read"),
-        ("/guild", "read"),
-        ("请参考历史消息 /guild create Task", None),
-        ("/guild创建 任务", None),
-    ],
-)
-def test_guild_commands_require_explicit_prefix(text, action):
-    assert guild_command(text) == action
-
-
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "task",
     [
         None,
-        command(source="scheduler"),
-        command(sender=""),
-        command(action="read"),
-        command(action=None),
+        message_task(source="scheduler"),
+        message_task(sender=""),
     ],
 )
-async def test_creation_requires_current_sender_and_create_command(task):
+async def test_creation_requires_current_sender(task):
     service, repository, directory = service_for()
     with pytest.raises(PermissionError):
         await service.create_node({"title": "Task"}, task)
     directory.lookup_user.assert_not_awaited()
+    repository.create_node.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("context", "parent_id"),
+    [
+        ("消息：确认，在设备维护（节点 123）下创建设备巡检", 123),
+        ("消息：创建一个独立的设备巡检活动，明天下午检查机房交换机和路由器", None),
+    ],
+)
+async def test_creation_accepts_current_message_context(context, parent_id):
+    service, repository, _ = service_for()
+    repository.create_node.return_value = {"id": 7, "created_by": "alice"}
+    task = message_task()
+    task.context = context
+    await service.create_node({"title": "设备巡检", "parent_id": parent_id}, task)
+    assert repository.create_node.call_args.args[2]["parent_id"] == parent_id
+
+
+@pytest.mark.asyncio
+async def test_missing_parent_never_silently_creates_a_root():
+    service, repository, _ = service_for()
+    with pytest.raises(ValueError, match="明确节点位置"):
+        await service.create_node({"title": "Task"}, message_task())
     repository.create_node.assert_not_awaited()
 
 
@@ -105,7 +113,7 @@ async def test_actor_identity_failures_never_reach_database(failure, expected):
     directory.lookup_user.side_effect = failure
     directory.lookup_user.return_value = None
     with pytest.raises(expected) as error:
-        await service.create_node({"title": "Task"}, command())
+        await service.create_node({"title": "Task"}, message_task())
     assert "secret-bearing-url" not in str(error.value)
     repository.create_node.assert_not_awaited()
 
@@ -115,7 +123,7 @@ async def test_position_and_bot_admin_do_not_grant_guild_admission():
     service, repository, directory = service_for()
     directory.realm_roles.return_value = ["position-techdept-head"]
     with pytest.raises(PermissionError, match="准入"):
-        await service.list_nodes({}, command())
+        await service.list_nodes({}, message_task())
     repository.nodes.assert_not_awaited()
 
 
@@ -131,12 +139,13 @@ async def test_create_normalizes_payload_and_uses_fresh_identity_for_unbound_tar
     result = await service.create_node(
         {
             "title": " Task ",
+            "parent_id": None,
             "description": " Detail ",
             "leader_subjects": ["bob", "bob"],
             "tags": [" xx ", "xx"],
             "due_at": "2026-11-10T12:00:00",
         },
-        command(),
+        message_task(),
     )
     subject, permissions, payload, request_key = repository.create_node.call_args.args
     assert subject == "alice" and permissions.manager
@@ -191,7 +200,7 @@ async def test_create_normalizes_payload_and_uses_fresh_identity_for_unbound_tar
 async def test_invalid_create_arguments_do_not_write(args):
     service, repository, _ = service_for()
     with pytest.raises(ValueError):
-        await service.create_node(args, command())
+        await service.create_node({"parent_id": None, **args}, message_task())
     repository.create_node.assert_not_awaited()
 
 
@@ -209,12 +218,13 @@ async def test_invalid_create_arguments_do_not_write(args):
         {"status": "unknown"},
         {"relation": "unknown"},
         {"parent_id": False},
+        {"sort": "unknown"},
     ],
 )
 async def test_invalid_list_arguments_do_not_query(args):
     service, repository, _ = service_for()
     with pytest.raises(ValueError):
-        await service.list_nodes(args, command())
+        await service.list_nodes(args, message_task())
     repository.nodes.assert_not_awaited()
 
 
@@ -222,10 +232,11 @@ async def test_invalid_list_arguments_do_not_query(args):
 async def test_tasks_and_todos_share_one_bounded_query_without_provisioning():
     service, repository, _ = service_for()
     repository.nodes.return_value = [{"id": 1}, {"id": 2}]
-    result = await service.list_nodes({"page_size": 1}, command())
+    result = await service.list_nodes({"page_size": 1}, message_task())
     filters = repository.nodes.call_args.args[0]
     assert filters["subject"] == "alice" and filters["status"] == "open"
     assert filters["include_inherited"] is False
+    assert filters["sort"] == "due"
     assert result == {
         "items": [{"id": 1, "url": "https://guild.example.com/nodes/1"}],
         "page": 1,
@@ -233,12 +244,16 @@ async def test_tasks_and_todos_share_one_bounded_query_without_provisioning():
         "next_page": 2,
     }
     await service.list_nodes(
-        {"scope": "user", "subject": "not-yet-in-guild"}, command()
+        {"scope": "user", "subject": "not-yet-in-guild"}, message_task()
     )
     assert repository.nodes.call_args.args[0]["subject"] == "not-yet-in-guild"
-    await service.list_nodes({"scope": "all", "parent_id": None}, command())
+    await service.list_nodes(
+        {"scope": "all", "parent_id": None, "status": "all", "sort": "position"},
+        message_task(),
+    )
     filters = repository.nodes.call_args.args[0]
     assert filters["subject"] is None and filters["filter_parent"]
+    assert filters["status"] == "all" and filters["sort"] == "position"
     repository.create_node.assert_not_awaited()
 
 
@@ -282,13 +297,14 @@ async def test_agent_binds_context_per_task_and_does_not_expose_actor_parameters
                 not {"sender_id", "subject", "created_by", "request_key"}
                 & schema["properties"].keys()
             )
+            assert set(schema["required"]) == {"title", "parent_id"}
             return AssistantReply(
                 "",
                 [
                     {
                         "function": {
                             "name": "create_guild_node",
-                            "arguments": '{"title":"Task"}',
+                            "arguments": '{"title":"Task","parent_id":null}',
                         }
                     }
                 ],
@@ -297,7 +313,8 @@ async def test_agent_binds_context_per_task_and_does_not_expose_actor_parameters
 
     runner = AgentRunner(config, Llm(), registry)
     await asyncio.gather(
-        runner.run_task(command()), runner.run_task(command(sender="67890"))
+        runner.run_task(message_task()),
+        runner.run_task(message_task(sender="67890")),
     )
     assert {call.args[0] for call in repository.create_node.await_args_list} == {
         "alice",
@@ -309,25 +326,42 @@ async def test_agent_binds_context_per_task_and_does_not_expose_actor_parameters
 
 
 @pytest.mark.asyncio
-async def test_explicit_guild_command_bypasses_classifier_but_obeys_routing(config):
+@pytest.mark.parametrize(
+    "text", ["在设备维护下面创建设备巡检", "确认创建", "/guild 创建 Task"]
+)
+async def test_guild_messages_use_normal_classification_and_routing(config, text):
     from test_priority_and_incoming import FakeClassifier, _message, _services
 
     config.guild.enabled = True
     classifier = FakeClassifier(important=False)
     incoming, tasks, _ = _services(config, classifier)
-    message = _message("12345", "/guild 创建 Task", "one")
+    message = _message("12345", text, "ignored")
     await incoming.handle(message)
+    assert tasks.empty()
+    assert classifier.calls == 1
+
+    classifier.important = True
+    message.message_id = "one"
+    await incoming.handle(message)
+    assert tasks.qsize() == 1
     task = await tasks.get()
-    assert task.sender_id == "12345" and task.metadata["guild_command"] == "create"
-    assert classifier.calls == 0
+    assert task.sender_id == "12345"
+    assert task.metadata["importance_method"] == "classifier"
+    assert set(task.metadata) == {
+        "kind", "message_id", "importance_method", "importance_reason", "confidence", "mentions"
+    }
+    assert classifier.calls == 2
     message.chat_type, message.raw_chat_id, message.message_id = "group", "99999", "two"
     await incoming.handle(message)
-    assert tasks.empty()  # Group commands must still @ the Bot.
+    assert tasks.empty()  # Group messages must still @ the Bot.
+    assert classifier.calls == 2
     message.mentioned_bot, message.message_id = True, "three"
     await incoming.handle(message)
     assert tasks.qsize() == 1
+    assert classifier.calls == 3
     config.allowlist_enabled = True
     config.allowlist_group_ids = []
     incoming, tasks, _ = _services(config, classifier)
     await incoming.handle(message)
     assert tasks.empty()
+    assert classifier.calls == 3

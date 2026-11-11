@@ -4,7 +4,6 @@ import logging
 from collections import deque
 
 from .contacts import ContactDirectory
-from .guild import guild_command
 from .messages import MessageStore
 from .napcat import IncomingMessage
 from .priority import ImportanceGate
@@ -92,7 +91,6 @@ class IncomingService:
                 "importance_reason": decision.reason,
                 "confidence": decision.confidence,
                 "mentions": message.mentions,
-                "guild_command": guild_command(message.content),
             },
         )
         LOGGER.info(

@@ -9,7 +9,6 @@ from typing import Any
 from .allowlist import ChatAllowlist
 from .config import AppConfig
 from .contacts import ContactDirectory, RoleStore
-from .guild import guild_command
 from .llm import LlmError, OpenAICompatibleClient, extract_json_object
 from .messages import MessageStore
 from .model_boundary import ModelIds
@@ -61,9 +60,6 @@ class ImportanceGate:
         if chat_type == "group" and not self._config.group_mention_enabled:
             return ImportanceDecision(False, "群聊 @ 自动回复已关闭", "routing")
 
-        if self._config.guild.enabled and guild_command(content):
-            return ImportanceDecision(True, "明确的 guild 命令", "command")
-
         role = self._roles.role_of(sender_id)
         if role == "admin":
             return ImportanceDecision(True, "发送者具有 admin 权限", "role")
@@ -90,6 +86,13 @@ class ImportanceGate:
                 "消息明确在向机器人提问、请求协助、安排协作、报告重要事项，"
                 "或需要机器人参与有信息价值的讨论。寒暄、水群、纯表情、"
                 "无明显需要的 @、重复内容、广告或无法行动的闲聊不重要。"
+                + (
+                    "Guild 已启用：自然语言查询任务、请求创建节点都需要处理。"
+                    "结合最近上下文识别对机器人上一轮追问的补充和对创建方案的确认，"
+                    "例如‘就放到设备维护下面’、‘确认创建’；不能把相关简短答复当作无意义闲聊。"
+                    if self._config.guild.enabled
+                    else ""
+                )
             ),
             "chat_type": chat_type,
             "chat_id": chat_id,

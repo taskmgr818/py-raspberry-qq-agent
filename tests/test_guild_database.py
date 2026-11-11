@@ -155,7 +155,7 @@ def guild_service(repository, subject):
     return service
 
 
-def guild_command_task(sender="12345", message_id=None):
+def guild_message_task(sender="12345", message_id=None):
     from py_raspberry_qq_agent.tasks import AgentTask
 
     return AgentTask(
@@ -165,7 +165,6 @@ def guild_command_task(sender="12345", message_id=None):
         chat_type="group",
         target_id="99999",
         metadata={
-            "guild_command": "create",
             "message_id": message_id or uuid.uuid4().hex,
         },
     )
@@ -178,8 +177,9 @@ async def test_creation_provisions_all_users_records_history_and_replays_across_
     conn, repository, subject = database
     await conn.execute("DELETE FROM users WHERE subject=%s", (subject,))
     service = guild_service(repository, subject)
-    task = guild_command_task()
+    task = guild_message_task()
     payload = {
+        "parent_id": None,
         "title": "Root",
         "description": "Initial description",
         "tags": ["tag"],
@@ -220,7 +220,7 @@ async def test_creation_provisions_all_users_records_history_and_replays_across_
             )
         ).fetchone()
     )[0] == 1
-    with pytest.raises(ValueError, match="新命令"):
+    with pytest.raises(ValueError, match="新消息"):
         await restarted.create_node({**payload, "title": "Changed"}, task)
     # A lost response must not recreate a node even if it was subsequently deleted.
     await conn.execute("DELETE FROM nodes WHERE id=%s", (node["id"],))
@@ -240,10 +240,10 @@ async def test_simultaneous_retries_commit_one_node(database):
 
     conn, repository, subject = database
     service = guild_service(repository, subject)
-    task = guild_command_task()
+    task = guild_message_task()
     first, second = await asyncio.gather(
-        service.create_node({"title": "Once"}, task),
-        service.create_node({"title": "Once"}, task),
+        service.create_node({"parent_id": None, "title": "Once"}, task),
+        service.create_node({"parent_id": None, "title": "Once"}, task),
     )
     assert first["id"] == second["id"]
     assert {first["replayed"], second["replayed"]} == {False, True}
@@ -262,20 +262,21 @@ async def test_creation_follows_root_and_inherited_leader_permissions(database):
     service = guild_service(repository, subject)
     root = await service.create_node(
         {
+            "parent_id": None,
             "title": "Root",
             "leader_subjects": [subject + "-alice"],
             "member_subjects": [subject + "-manager"],
         },
-        guild_command_task(),
+        guild_message_task(),
     )
     parent = await service.create_node(
-        {"title": "Parent", "parent_id": root["id"]}, guild_command_task()
+        {"title": "Parent", "parent_id": root["id"]}, guild_message_task()
     )
     await conn.execute(
         "UPDATE nodes SET updated_at='2020-01-01' WHERE id=%s", (parent["id"],)
     )
     child = await service.create_node(
-        {"title": "Inherited", "parent_id": parent["id"]}, guild_command_task("23456")
+        {"title": "Inherited", "parent_id": parent["id"]}, guild_message_task("23456")
     )
     assert child["created_by"] == subject + "-alice"
     assert child["members"][0]["subject"] == subject + "-alice"
@@ -289,22 +290,22 @@ async def test_creation_follows_root_and_inherited_leader_permissions(database):
     )[0]
     with pytest.raises(PermissionError, match="manager"):
         await service.create_node(
-            {"title": "Forbidden root"}, guild_command_task("23456")
+            {"parent_id": None, "title": "Forbidden root"}, guild_message_task("23456")
         )
     # A department manager who is only a member of the parent cannot add a child.
     with pytest.raises(PermissionError, match="有效负责人"):
         await service.create_node(
             {"title": "Forbidden child", "parent_id": parent["id"]},
-            guild_command_task("34567"),
+            guild_message_task("34567"),
         )
     manager_root = await service.create_node(
-        {"title": "Manager root"}, guild_command_task("34567")
+        {"parent_id": None, "title": "Manager root"}, guild_message_task("34567")
     )
     assert manager_root["members"][0]["subject"] == subject + "-manager"
     with pytest.raises(LookupError):
         await service.create_node(
             {"title": "Missing parent", "parent_id": 9223372036854775807},
-            guild_command_task(),
+            guild_message_task(),
         )
 
 
@@ -357,7 +358,9 @@ async def test_failed_transaction_rolls_back_users_nodes_and_receipts(database):
 async def test_node_queries_distinguish_direct_inherited_and_system_todos(database):
     conn, repository, subject = database
     service = guild_service(repository, subject)
-    root = await service.create_node({"title": "Root"}, guild_command_task())
+    root = await service.create_node(
+        {"parent_id": None, "title": "Root"}, guild_message_task()
+    )
     child = await service.create_node(
         {
             "title": "Child",
@@ -365,24 +368,27 @@ async def test_node_queries_distinguish_direct_inherited_and_system_todos(databa
             "leader_subjects": [subject + "-alice"],
             "member_subjects": [subject + "-manager"],
         },
-        guild_command_task(),
+        guild_message_task(),
     )
     leaf = await service.create_node(
-        {"title": "Leaf", "parent_id": child["id"]}, guild_command_task()
+        {"title": "Leaf", "parent_id": child["id"]}, guild_message_task()
     )
     overdue = await service.create_node(
         {
+            "parent_id": None,
             "title": "Overdue",
             "due_at": "2020-01-01T00:00:00Z",
             "leader_subjects": [subject + "-alice"],
         },
-        guild_command_task(),
+        guild_message_task(),
     )
-    completed = await service.create_node({"title": "Completed"}, guild_command_task())
+    completed = await service.create_node(
+        {"parent_id": None, "title": "Completed"}, guild_message_task()
+    )
     await conn.execute(
         "UPDATE nodes SET completed_at=now() WHERE id=%s", (completed["id"],)
     )
-    task = guild_command_task("23456")
+    task = guild_message_task("23456")
     assert {n["id"] for n in (await service.list_nodes({}, task))["items"]} == {
         child["id"],
         overdue["id"],
@@ -392,7 +398,7 @@ async def test_node_queries_distinguish_direct_inherited_and_system_todos(databa
         for n in (await service.list_nodes({"include_inherited": True}, task))["items"]
     } == {root["id"], child["id"], leaf["id"], overdue["id"]}
     # An ordinary parent member gains membership upward, not downward.
-    manager = guild_command_task("34567")
+    manager = guild_message_task("34567")
     assert {
         n["id"]
         for n in (await service.list_nodes({"include_inherited": True}, manager))[
@@ -425,19 +431,80 @@ async def test_node_queries_distinguish_direct_inherited_and_system_todos(databa
 
 
 @pytest.mark.asyncio
+async def test_navigation_disambiguates_same_titles_and_keeps_lists_compact(database):
+    conn, repository, subject = database
+    service = guild_service(repository, subject)
+    roots, children = [], []
+    for title in ("机房设备", "活动设备"):
+        root = await service.create_node(
+            {"title": title, "parent_id": None}, guild_message_task()
+        )
+        roots.append(root)
+        children.append(
+            await service.create_node(
+                {
+                    "title": "日常维护",
+                    "parent_id": root["id"],
+                    "description": title + "的维护职责" + "x" * 10000,
+                    "leader_subjects": [subject + "-alice"],
+                    "member_subjects": [subject + "-manager", subject + "-bob"],
+                },
+                guild_message_task(),
+            )
+        )
+    # The most urgent node is not necessarily first on the board.
+    await conn.execute(
+        "UPDATE nodes SET completed_at=now(), due_at='2020-01-01', sort_order=100 WHERE id=%s",
+        (roots[0]["id"],),
+    )
+    task = guild_message_task("23456")  # Does not directly participate in the roots.
+    args = {"scope": "all", "status": "all", "parent_id": None, "sort": "position", "page_size": 1}
+    page = await service.list_nodes(args, task)
+    assert page["items"][0]["id"] == roots[1]["id"]
+    assert page["has_more"] and page["next_page"] == 2
+    page = await service.list_nodes({**args, "page": 2}, task)
+    assert page["items"][0]["id"] == roots[0]["id"]
+    assert page["items"][0]["completed_at"] is not None
+    assert page["items"][0]["child_count"] == 1
+    assert not page["has_more"]
+
+    found = await service.list_nodes(
+        {"scope": "all", "status": "all", "query": "日常维护"}, task
+    )
+    for row, root, child in zip(found["items"], roots, children, strict=True):
+        assert row["path"] == [
+            {"id": root["id"], "title": root["title"]},
+            {"id": child["id"], "title": "日常维护"},
+        ]
+        assert row["child_count"] == 0
+        assert row["leaders"] == [{"subject": subject + "-alice", "name": "Alice"}]
+        assert row["member_count"] == 2
+        assert not {"description", "members", "created_by", "creator", "updated_at"} & row.keys()
+        detail = await service.get_node({"node_id": child["id"]}, task)
+        assert detail["path"] == row["path"]
+        assert detail["child_count"] == 0
+        assert len(detail["description"]) > 10000
+        assert len(detail["members"]) == 3
+        siblings = await service.list_nodes(
+            {"scope": "all", "status": "all", "parent_id": root["id"]}, task
+        )
+        assert [n["id"] for n in siblings["items"]] == [child["id"]]
+
+
+@pytest.mark.asyncio
 async def test_recent_activity_combines_persistent_sources_with_pagination(database):
     import json
 
     conn, repository, subject = database
     service = guild_service(repository, subject)
     node = await service.create_node(
-        {"title": "Task", "description": "Initial"}, guild_command_task()
+        {"parent_id": None, "title": "Task", "description": "Initial"}, guild_message_task()
     )
     await conn.execute(
         "INSERT INTO comments(node_id,author_subject,body) VALUES (%s,%s,%s)",
         (node["id"], subject, "x" * 1500),
     )
-    task = guild_command_task()
+    task = guild_message_task()
     result = await service.list_activity({"node_id": node["id"]}, task)
     assert {item["kind"] for item in result["items"]} == {
         "node_created",

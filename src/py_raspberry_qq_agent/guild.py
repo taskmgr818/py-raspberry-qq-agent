@@ -24,13 +24,6 @@ if TYPE_CHECKING:
 LOGGER = logging.getLogger(__name__)
 
 
-def guild_command(content: str) -> str | None:
-    parts = content.strip().split(maxsplit=2)
-    if not parts or parts[0] != "/guild":
-        return None
-    return "create" if len(parts) > 1 and parts[1] in {"创建", "create"} else "read"
-
-
 def _jsonable(value: Any) -> Any:
     if isinstance(value, datetime):
         return value.isoformat()
@@ -41,13 +34,35 @@ def _jsonable(value: Any) -> Any:
     return value
 
 
-# Shared by detail and list queries; only direct memberships are stored.
+# Detail returns all direct memberships; lists only need leaders and a member count.
 _NODE_MEMBERS = """
     COALESCE((
         SELECT jsonb_agg(jsonb_build_object('subject', m.subject, 'role', m.role)
                          ORDER BY m.role, m.subject)
         FROM node_members m WHERE m.node_id=n.id
     ), '[]'::jsonb) AS members
+"""
+
+_NODE_CONTEXT = """
+    (
+        WITH RECURSIVE ancestors AS (
+            SELECT id, parent_id, title, 0 AS depth FROM nodes WHERE id=n.id
+            UNION ALL
+            SELECT p.id, p.parent_id, p.title, a.depth+1
+            FROM nodes p JOIN ancestors a ON p.id=a.parent_id
+        )
+        SELECT jsonb_agg(jsonb_build_object('id', id, 'title', title) ORDER BY depth DESC)
+        FROM ancestors
+    ) AS path,
+    (SELECT count(*) FROM nodes c WHERE c.parent_id=n.id) AS child_count
+"""
+
+_NODE_SUMMARY_MEMBERS = """
+    COALESCE((
+        SELECT jsonb_agg(jsonb_build_object('subject', m.subject) ORDER BY m.subject)
+        FROM node_members m WHERE m.node_id=n.id AND m.role='leader'
+    ), '[]'::jsonb) AS leaders,
+    (SELECT count(*) FROM node_members m WHERE m.node_id=n.id AND m.role='member') AS member_count
 """
 
 
@@ -118,7 +133,8 @@ class GuildRepository:
 
     async def node(self, node_id: int) -> dict[str, Any]:
         rows = await self.query(
-            f"SELECT n.*, {_NODE_MEMBERS} FROM nodes n WHERE n.id=%s", (node_id,)
+            f"SELECT n.*, {_NODE_MEMBERS}, {_NODE_CONTEXT} FROM nodes n WHERE n.id=%s",
+            (node_id,),
         )
         if not rows:
             raise LookupError("guild 节点不存在")
@@ -142,21 +158,26 @@ class GuildRepository:
                          WHEN n.id IN (SELECT id FROM participated) THEN 'member' END
                     ELSE (SELECT role FROM direct WHERE node_id=n.id) END AS relation
                 FROM nodes n
+            ), selected AS (
+                SELECT n.* FROM related n
+                WHERE (%(subject)s::text IS NULL OR
+                    (%(relation)s='any' AND n.relation IS NOT NULL) OR n.relation=%(relation)s)
+                  AND (%(status)s='all' OR
+                    (%(status)s='open' AND n.completed_at IS NULL) OR
+                    (%(status)s='completed' AND n.completed_at IS NOT NULL))
+                  AND (NOT %(overdue)s OR
+                       (n.completed_at IS NULL AND n.due_at < clock_timestamp()))
+                  AND (NOT %(filter_parent)s OR n.parent_id IS NOT DISTINCT FROM %(parent_id)s::bigint)
+                  AND (%(query)s='' OR strpos(lower(n.title), lower(%(query)s)) > 0)
+                ORDER BY CASE WHEN %(sort)s='due' THEN n.due_at END ASC NULLS LAST,
+                         CASE WHEN %(sort)s='position' THEN n.sort_order END, n.id
+                LIMIT %(limit)s OFFSET %(offset)s
             )
             SELECT n.id, n.parent_id, n.title, n.due_at, n.completed_at, n.tags,
-                   n.created_by, n.updated_at, n.relation, {_NODE_MEMBERS}
-            FROM related n
-            WHERE (%(subject)s::text IS NULL OR
-                (%(relation)s='any' AND n.relation IS NOT NULL) OR n.relation=%(relation)s)
-              AND (%(status)s='all' OR
-                (%(status)s='open' AND n.completed_at IS NULL) OR
-                (%(status)s='completed' AND n.completed_at IS NOT NULL))
-              AND (NOT %(overdue)s OR
-                   (n.completed_at IS NULL AND n.due_at < clock_timestamp()))
-              AND (NOT %(filter_parent)s OR n.parent_id IS NOT DISTINCT FROM %(parent_id)s::bigint)
-              AND (%(query)s='' OR strpos(lower(n.title), lower(%(query)s)) > 0)
-            ORDER BY n.due_at ASC NULLS LAST, n.id
-            LIMIT %(limit)s OFFSET %(offset)s
+                   n.relation, {_NODE_CONTEXT}, {_NODE_SUMMARY_MEMBERS}
+            FROM selected n
+            ORDER BY CASE WHEN %(sort)s='due' THEN n.due_at END ASC NULLS LAST,
+                     CASE WHEN %(sort)s='position' THEN n.sort_order END, n.id
             """,
             filters,
         )
@@ -190,7 +211,7 @@ class GuildRepository:
     ) -> dict[str, Any]:
         await self.initialize()
         async with self._connection(read_only=False) as connection:
-            # Serialize retries of one command across processes and restarts.
+            # Serialize retries of one message across processes and restarts.
             await connection.execute(
                 "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", (request_key,)
             )
@@ -202,7 +223,7 @@ class GuildRepository:
             ).fetchone()
             if receipt:
                 if receipt["subject"] != subject or receipt["payload"] != payload:
-                    raise ValueError("同一创建命令已提交其他内容，请发送一条新命令")
+                    raise ValueError("同一消息已提交其他创建内容，请发送一条新消息")
                 return {**receipt["result"], "replayed": True}
 
             parent_id = payload["parent_id"]
@@ -316,7 +337,7 @@ class GuildRepository:
 
 
 class GuildService:
-    """Validate command actors and expose bounded guild operations to the agent."""
+    """Validate message senders and expose bounded guild operations to the agent."""
 
     def __init__(
         self,
@@ -354,8 +375,6 @@ class GuildService:
     ) -> tuple[User, SitePermissions]:
         if task is None or task.source != "incoming_message" or not task.sender_id:
             raise PermissionError("guild 工具需要当前 QQ 消息的真实发送者")
-        if write and task.metadata.get("guild_command") != "create":
-            raise PermissionError("创建节点请发送 /guild 创建 ... 命令")
         return await self._identity(qq=task.sender_id, refresh=write)
 
     @staticmethod
@@ -407,7 +426,8 @@ class GuildService:
             subjects = [
                 row[key] for key in ("created_by", "author_subject") if key in row
             ]
-            subjects += [member["subject"] for member in row.get("members", [])]
+            members = row.get("members", []) + row.get("leaders", [])
+            subjects += [member["subject"] for member in members]
             for subject in subjects:
                 if subject not in names:
                     try:
@@ -421,7 +441,7 @@ class GuildService:
             ):
                 if key in row:
                     row[output] = {"subject": row[key], "name": names[row[key]]}
-            for member in row.get("members", []):
+            for member in members:
                 member["name"] = names[member["subject"]]
             node_id = row.get("node_id", row["id"])
             if self._config.public_url:
@@ -450,6 +470,7 @@ class GuildService:
                 "include_inherited",
                 "parent_id",
                 "query",
+                "sort",
                 "page",
                 "page_size",
             },
@@ -465,6 +486,9 @@ class GuildService:
             raise ValueError("无效的 scope、relation 或 status")
         if ("subject" in args) != (scope == "user"):
             raise ValueError("只有 scope=user 时必须提供 subject")
+        sort = args.get("sort", "due")
+        if sort not in ("due", "position"):
+            raise ValueError("无效的 sort")
         subject = actor.subject if scope == "mine" else None
         if scope == "user":
             subject = self._text(args["subject"], "subject", 255, required=True)
@@ -486,6 +510,7 @@ class GuildService:
                 "filter_parent": "parent_id" in args,
                 "parent_id": parent_id,
                 "query": self._text(args.get("query", ""), "query", 200),
+                "sort": sort,
             }
         )
         return {
@@ -533,6 +558,8 @@ class GuildService:
             },
         )
         actor, permissions = await self._actor(task, write=True)
+        if "parent_id" not in args:
+            raise ValueError("创建前请明确节点位置：根节点传 parent_id=null，子节点传已核实的父节点 ID")
         parent_id = args.get("parent_id")
         if parent_id is not None:
             self._integer(parent_id, "parent_id")
