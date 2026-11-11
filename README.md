@@ -70,10 +70,11 @@ message_gateway:
   poll_interval_seconds: 0.5
 ```
 
-`account` 对应网关 `accounts.json` 中的 `name`，API key 与网关一致。
+`account` 对应网关 `accounts.json` 中的 `name`，`api_key` 使用该账号的 `client_token`。
 所有聊天回复、定时发送和业务通知均走该账号的共享队列；允许列表规则保持不变。
 启用后 Agent 不再额外随机等待，临时会话发现、发送重试和限流由网关负责。
-Agent 只提交一次 `POST /api/v1/messages`，再查询投递状态，收到 `sent` 后才记录已发送及 QQ
+Agent 只提交一次 `POST /api/v1/accounts/{account}/send_private_msg_async`（群聊使用
+`send_group_msg_async`），再查询同一账号的 `message-status/{delivery_id}`，收到 `sent` 后才记录已发送及 QQ
 消息 ID。网关失败或超时不会直连 NapCat 补发；超时意味着结果未知，避免重复提交。
 `delivery_timeout_seconds` 包含排队时间，应覆盖其他服务的积压和网关的重试时间。
 

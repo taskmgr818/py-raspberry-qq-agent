@@ -31,7 +31,8 @@ def gateway_config(**overrides: Any) -> MessageGatewayConfig:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("kind", ["user", "group"])
-async def test_waits_for_sent_receipt_without_resubmitting(kind: str) -> None:
+@pytest.mark.parametrize("account", ["qq", "miss-raspberry"])
+async def test_waits_for_sent_receipt_without_resubmitting(kind: str, account: str) -> None:
     requests: list[httpx.Request] = []
     states = iter(
         [
@@ -45,17 +46,21 @@ async def test_waits_for_sent_receipt_without_resubmitting(kind: str) -> None:
         requests.append(request)
         assert request.headers["Authorization"] == "Bearer test-secret"
         if request.method == "POST":
+            action = "send_private_msg_async" if kind == "user" else "send_group_msg_async"
+            assert request.url.path == f"/api/v1/accounts/{account}/{action}"
             assert json.loads(request.content) == {
-                "platform": "qq",
-                "target": {"kind": kind, "id": "10001"},
-                "text": "hello",
+                "user_id" if kind == "user" else "group_id": 10001,
+                "message": "hello",
             }
-            return httpx.Response(202, json={"id": "qq-1", "status": "queued"})
-        assert request.url.path == "/api/v1/messages/qq-1"
+            return httpx.Response(
+                202,
+                json={"status": "async", "retcode": 1, "data": {"delivery_id": "qq-1"}},
+            )
+        assert request.url.path == f"/api/v1/accounts/{account}/message-status/qq-1"
         return httpx.Response(200, json={"id": "qq-1", **next(states)})
 
     client = MessageGatewayClient(
-        gateway_config(), transport=httpx.MockTransport(handler)
+        gateway_config(account=account), transport=httpx.MockTransport(handler)
     )
     try:
         send = client.send_private if kind == "user" else client.send_group
@@ -89,7 +94,10 @@ async def test_failures_never_resubmit(failure: str) -> None:
                 raise httpx.ReadTimeout("outcome unknown", request=request)
             if failure == "queue_full":
                 return httpx.Response(429, json={"error": "message queue is full"})
-            return httpx.Response(202, json={"id": "qq-1", "status": "queued"})
+            return httpx.Response(
+                202,
+                json={"status": "async", "retcode": 1, "data": {"delivery_id": "qq-1"}},
+            )
         if failure == "expired":
             return httpx.Response(404, json={"error": "unknown delivery id"})
         if failure == "timeout":
@@ -131,9 +139,14 @@ async def test_queue_uses_gateway_receipt_and_skips_local_pacing(
 
     def handler(request: httpx.Request) -> httpx.Response:
         if request.method == "POST":
-            posted.append(json.loads(request.content)["target"]["kind"])
+            posted.append("user" if "user_id" in json.loads(request.content) else "group")
             return httpx.Response(
-                202, json={"id": f"qq-{len(posted)}", "status": "queued"}
+                202,
+                json={
+                    "status": "async",
+                    "retcode": 1,
+                    "data": {"delivery_id": f"qq-{len(posted)}"},
+                },
             )
         return httpx.Response(
             200,

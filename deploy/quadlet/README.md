@@ -18,7 +18,7 @@ Agent 原配置和数据放在 `~/miss-raspberry-agent/`；在 `config.yaml` 中
 
 ```dotenv
 MESSAGE_GATEWAY_URL=http://message-gateway:8081
-MESSAGE_GATEWAY_API_KEY=<与网关相同的 key>
+MESSAGE_GATEWAY_API_KEY=<网关 accounts.json 中该账号的 client_token>
 MESSAGE_GATEWAY_ACCOUNT=qq
 ```
 

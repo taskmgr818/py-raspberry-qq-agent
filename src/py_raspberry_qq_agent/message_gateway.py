@@ -48,30 +48,35 @@ class MessageGatewayClient:
 
     async def _send(self, kind: str, target_id: str, content: str) -> dict[str, Any]:
         delivery_id = "unknown"
+        account_path = "api/v1/accounts/" + quote(self._config.account, safe="")
+        action = "send_private_msg_async" if kind == "user" else "send_group_msg_async"
+        target_key = "user_id" if kind == "user" else "group_id"
         try:
             async with asyncio.timeout(self._config.delivery_timeout_seconds):
                 # No retries: the gateway has no idempotency key. All delivery
                 # retries and pacing belong to its shared per-account queue.
                 response = await self._http.post(
-                    "api/v1/messages",
+                    account_path + "/" + action,
                     json={
-                        "platform": self._config.account,
-                        "target": {"kind": kind, "id": target_id},
-                        "text": content,
+                        target_key: int(target_id),
+                        "message": content,
                     },
                 )
                 response.raise_for_status()
                 queued = self._object(response)
+                data = queued.get("data")
                 if (
                     response.status_code != 202
-                    or queued.get("status") != "queued"
-                    or not isinstance(queued.get("id"), str)
-                    or not queued["id"]
+                    or queued.get("status") != "async"
+                    or queued.get("retcode") != 1
+                    or not isinstance(data, dict)
+                    or not isinstance(data.get("delivery_id"), str)
+                    or not data["delivery_id"]
                 ):
                     raise MessageGatewayError(
                         "invalid gateway enqueue response; not resubmitting"
                     )
-                delivery_id = queued["id"]
+                delivery_id = data["delivery_id"]
                 LOGGER.info(
                     "gateway message queued id=%s account=%s",
                     delivery_id,
@@ -79,7 +84,7 @@ class MessageGatewayClient:
                 )
                 while True:
                     response = await self._http.get(
-                        "api/v1/messages/" + quote(delivery_id, safe="")
+                        account_path + "/message-status/" + quote(delivery_id, safe="")
                     )
                     response.raise_for_status()
                     delivery = self._object(response)
